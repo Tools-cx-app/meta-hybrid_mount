@@ -4,10 +4,10 @@ use std::{
     env,
     fs,
     path::{Path, PathBuf},
-    process::Command,
+    process::Command, // Removed Stdio
 };
 
-use anyhow::Result;
+use anyhow::Result; // Removed Context
 use clap::{Parser, Subcommand};
 use fs_extra::dir;
 use zip::{write::FileOptions, CompressionMethod};
@@ -23,17 +23,14 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Build the full project
+    /// Build the full project (zakosign disabled temporarily)
     Build {
         /// Build in release mode
         #[arg(long)]
         release: bool,
-        /// Path to signing private key (PEM format)
+        /// (Disabled) Path to signing private key
         #[arg(long)]
         sign_key: Option<PathBuf>,
-        /// Path to external, pre-compiled zakosign binary
-        #[arg(long)]
-        zakosign_bin: Option<PathBuf>,
     },
 }
 
@@ -42,7 +39,8 @@ fn main() -> Result<()> {
     let root = project_root();
 
     match cli.command {
-        Commands::Build { release, sign_key, zakosign_bin } => {
+        // We ignore sign_key with `_` since zakosign is disabled
+        Commands::Build { release, sign_key: _ } => {
             let output_dir = root.join("output");
             let module_build_dir = output_dir.join("module_files");
 
@@ -56,10 +54,14 @@ fn main() -> Result<()> {
             // 2. Build WebUI
             build_webui(&root)?;
 
-            // 3. Build Core (Android)
+            // 3. Build Zakosign (Host Tool) - [DISABLED]
+            // We force this to None to skip signing logic
+            let zakosign_bin: Option<PathBuf> = None; 
+
+            // 4. Build Core (Android)
             let core_bin = build_core(&root, release)?;
 
-            // 4. Copy Module Files
+            // 5. Copy Module Files
             println!(":: Copying module files...");
             let module_src = root.join("module");
             dir::copy(
@@ -72,22 +74,27 @@ fn main() -> Result<()> {
             let gitignore = module_build_dir.join(".gitignore");
             if gitignore.exists() { fs::remove_file(gitignore)?; }
 
-            // 5. Inject Version
+            // 6. Inject Version
             let version = inject_version(&module_build_dir)?;
             fs::write(output_dir.join("version"), &version)?;
 
-            // 6. Install Core Binary
+            // 7. Install Core Binary
             let dest_bin = module_build_dir.join("meta-hybrid");
             fs::copy(&core_bin, &dest_bin)?;
 
-            // 7. Zip Package
+            // 8. Signing Logic (Skipped)
+            if zakosign_bin.is_some() {
+                println!(":: [WARNING] Signing is currently disabled in code.");
+            }
+
+            // 9. Zip Package
             println!(":: Creating zip archive...");
             let options = FileOptions::default()
                 .compression_method(CompressionMethod::Deflated)
                 .compression_level(Some(9));
             
             let zip_name = format!("meta-hybrid-{}.zip", version);
-            let zip_path = output_dir.join(&zip_name);
+            let zip_path = output_dir.join(zip_name);
             
             // Zip creates from module_build_dir
             zip_create_from_directory_with_options(
@@ -95,33 +102,6 @@ fn main() -> Result<()> {
                 &module_build_dir,
                 |_| options,
             )?;
-
-            // 8. Signing Logic (Using external zakosign binary)
-            if let Some(bin_path) = zakosign_bin {
-                if let Some(key_path) = sign_key {
-                    println!(":: Signing module zip using external zakosign...");
-                    
-                    if !bin_path.exists() {
-                        anyhow::bail!("Zakosign binary not found at: {}", bin_path.display());
-                    }
-
-                    // Execute: zakosign sign <zip_path> <private_key>
-                    let status = Command::new(&bin_path)
-                        .arg("sign")
-                        .arg(&zip_path)
-                        .arg(&key_path)
-                        .status()?;
-
-                    if !status.success() {
-                        anyhow::bail!("Failed to sign module zip. Exit code: {:?}", status.code());
-                    }
-                    println!(":: Signature applied successfully.");
-                } else {
-                    println!(":: [WARNING] zakosign binary provided but 'sign_key' is missing. Skipping signature.");
-                }
-            } else if sign_key.is_some() {
-                 println!(":: [WARNING] sign_key provided but 'zakosign_bin' is missing. Skipping signature.");
-            }
 
             println!(":: Build success: {}", zip_path.display());
         }

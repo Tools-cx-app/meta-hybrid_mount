@@ -32,9 +32,23 @@ jobs:
         with:
           ndk-version: r26b
 
+      # [DISABLED] Cache Zakosign Build
+      # - name: Cache Zakosign Build
+      #   uses: actions/cache@v4
+      #   with:
+      #     path: |
+      #       zakosign/boringssl/build-host
+      #       zakosign/obj
+      #       zakosign/bin
+      #     key: ${{ runner.os }}-zakosign-host-${{ hashFiles('zakosign/Makefile', 'zakosign/.gitmodules') }}
+      #     restore-keys: |
+      #       ${{ runner.os }}-zakosign-host-
+
       - name: Install Build Dependencies
         run: |
           sudo apt-get update
+          # [DISABLED] zakosign deps
+          # sudo apt-get install -y ninja-build clang cmake
 
       - name: Setup Rust Toolchain
         uses: dtolnay/rust-toolchain@nightly
@@ -44,6 +58,8 @@ jobs:
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "."
 
       - name: Install cargo-ndk
         run: cargo install cargo-ndk
@@ -60,46 +76,81 @@ jobs:
           cd webui
           npm install
 
-      - name: Build Project
-        env:
-          LD_LIBRARY_PATH: ${{ github.workspace }}/tools/zakosign
+      - name: Update Module Version
         run: |
-          # 1. Write the signing key from GitHub Secrets to a temporary file
-          echo "${{ secrets.ZAKOSIGN_KEY }}" > zako_private.key
+          PROP_FILE="module/module.prop"
+          TAG_NAME="${{ github.ref_name }}"
+          RUN_NUMBER="${{ github.run_number }}"
           
-          # 2. Ensure the zakosign binary is executable
-          chmod +x tools/zakosign/zakosign
+          echo "Updating module.prop info..."
+          echo "  Version -> $TAG_NAME"
+          echo "  VersionCode -> $RUN_NUMBER"
+          
+          sed -i "s/^version=.*/version=$TAG_NAME/" "$PROP_FILE"
+          sed -i "s/^versionCode=.*/versionCode=$RUN_NUMBER/" "$PROP_FILE"
+          
+          cat "$PROP_FILE"
 
-          # 3. Build and sign the project
-          # Passing the key path and the binary path to xtask
-          cargo run -p xtask -- build --release \
-            --sign-key zako_private.key \
-            --zakosign-bin tools/zakosign/zakosign
+      # [DISABLED] Prepare Signing Key
+      # - name: Prepare Signing Key
+      #   id: key_prep
+      #   env:
+      #     ZAKOSIGN_KEY_CONTENT: ${{ secrets.ZAKOSIGN_KEY }}
+      #   run: |
+      #     if [ -n "$ZAKOSIGN_KEY_CONTENT" ]; then
+      #       echo "$ZAKOSIGN_KEY_CONTENT" > /tmp/private.pem
+      #       echo "has_key=true" >> $GITHUB_OUTPUT
+      #     else
+      #       echo "No signing key found in secrets."
+      #       echo "has_key=false" >> $GITHUB_OUTPUT
+      #     fi
+
+      - name: Build Project
+        run: |
+          echo "Building without signature (Zakosign disabled)..."
+          cargo run -p xtask -- build --release
+
+      - name: Generate Update Files
+        id: meta
+        run: |
+          PROP_FILE="output/module_files/module.prop"
+          VERSION=$(grep "^version=" "$PROP_FILE" | cut -d= -f2)
+          VERSION_CODE=$(grep "^versionCode=" "$PROP_FILE" | cut -d= -f2)
           
-          # 4. Clean up the private key for security
-          rm zako_private.key
+          ZIP_FILE=$(cd output && ls *.zip | head -n 1)
           
-          # 5. Generate changelog and version info
-          if [ -f "output/version" ]; then
-            VERSION=$(cat output/version)
-            echo "VERSION=$VERSION" >> $GITHUB_ENV
-            
-            # Get previous tag
-            PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
-            
-            echo "## $VERSION" > /tmp/changelog.md
-            echo "" >> /tmp/changelog.md
-            
-            if [ -z "$PREV_TAG" ]; then
-              echo "Initial release." >> /tmp/changelog.md
-              git log --pretty=format:"* %s" >> /tmp/changelog.md
-            else
-              echo "Changes since $PREV_TAG:" >> /tmp/changelog.md
-              git log --pretty=format:"* %s" "$PREV_TAG..HEAD" >> /tmp/changelog.md
-            fi
-            
-            cat /tmp/update.json
+          REPO="${{ github.repository }}"
+          TAG="${{ github.ref_name }}"
+          DOWNLOAD_URL="https://github.com/$REPO/releases/download/$TAG/$ZIP_FILE"
+          CHANGELOG_URL="https://raw.githubusercontent.com/YuzakiKokuban/meta-hybrid_mount/master/changelog.md"
+          
+          echo "Final Version: $VERSION"
+          echo "Final Code: $VERSION_CODE"
+          echo "Zip: $ZIP_FILE"
+          
+          cat <<EOF > /tmp/update.json
+          {
+            "version": "$VERSION",
+            "versionCode": $VERSION_CODE,
+            "zipUrl": "$DOWNLOAD_URL",
+            "changelog": "$CHANGELOG_URL"
+          }
+          EOF
+          
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          
+          echo "## $VERSION" > /tmp/changelog.md
+          echo "" >> /tmp/changelog.md
+          
+          if [ -z "$PREV_TAG" ]; then
+            echo "Initial release." >> /tmp/changelog.md
+            git log --pretty=format:"* %s" >> /tmp/changelog.md
+          else
+            echo "Changes since $PREV_TAG:" >> /tmp/changelog.md
+            git log --pretty=format:"* %s" "$PREV_TAG..HEAD" >> /tmp/changelog.md
           fi
+          
+          cat /tmp/update.json
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
@@ -126,6 +177,6 @@ jobs:
           if git diff --staged --quiet; then
             echo "No changes to update.json or changelog.md"
           else
-            git commit -m "chore: update release info [skip ci]"
+            git commit -m "[skip ci] Update KernelSU json and changelog for ${{ github.ref_name }}"
             git push origin master
           fi

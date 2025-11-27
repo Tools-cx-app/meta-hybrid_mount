@@ -32,10 +32,23 @@ jobs:
         with:
           ndk-version: r26b
 
+      # [DISABLED] Cache Zakosign Build
+      # - name: Cache Zakosign Build
+      #   uses: actions/cache@v4
+      #   with:
+      #     path: |
+      #       zakosign/boringssl/build-host
+      #       zakosign/obj
+      #       zakosign/bin
+      #     key: ${{ runner.os }}-zakosign-host-${{ hashFiles('zakosign/Makefile', 'zakosign/.gitmodules') }}
+      #     restore-keys: |
+      #       ${{ runner.os }}-zakosign-host-
+
       - name: Install Build Dependencies
         run: |
           sudo apt-get update
-          # zakosign dependencies are no longer needed as we use pre-compiled binaries
+          # [DISABLED] Removed ninja-build and cmake as zakosign is disabled
+          # sudo apt-get install -y ninja-build clang cmake
 
       - name: Setup Rust Toolchain
         uses: dtolnay/rust-toolchain@nightly
@@ -62,25 +75,10 @@ jobs:
           npm install
 
       - name: Build Project
-        env:
-          LD_LIBRARY_PATH: ${{ github.workspace }}/tools/zakosign
         run: |
-          # 1. Write the signing key from GitHub Secrets to a temporary file
-          echo "${{ secrets.ZAKOSIGN_KEY }}" > zako_private.key
+          # Standard build without signing
+          cargo run -p xtask -- build --release
           
-          # 2. Ensure the zakosign binary is executable
-          chmod +x tools/zakosign/zakosign
-
-          # 3. Build and sign the project
-          # Passing the key path and the binary path to xtask
-          cargo run -p xtask -- build --release \
-            --sign-key zako_private.key \
-            --zakosign-bin tools/zakosign/zakosign
-          
-          # 4. Clean up the private key for security
-          rm zako_private.key
-          
-          # 5. Export version for artifact naming
           if [ -f "output/version" ]; then
             echo "MODULE_VERSION=$(cat output/version)" >> $GITHUB_ENV
           else
@@ -91,4 +89,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: Meta-Hybrid-${{ env.MODULE_VERSION }}
-          path: output/meta-hybrid-*.zip
+          path: output/module_files/
+          if-no-files-found: error
+          include-hidden-files: true
