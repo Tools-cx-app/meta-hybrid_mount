@@ -16,8 +16,8 @@ ui_print "- Using Hybrid Mount metainstall"
 # Standard installation (extracts to /data/adb/modules/meta-hybrid)
 install_module
 
-# NOTE: We no longer move files to modules.img at install time.
-# The Rust daemon will handle copying files to Tmpfs or Image at boot time.
-# This ensures we always have the source files available for fallback logic.
+# NOTE: We NO LONGER move files to modules.img at install time.
+# The Rust daemon will sync files to Tmpfs/Image at boot.
+# Users MUST reinstall their modules if upgrading from v0.2.x.
 
 ui_print "- Installation complete"

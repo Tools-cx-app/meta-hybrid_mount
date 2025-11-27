@@ -7,12 +7,11 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use rustix::mount::{mount, MountFlags, unmount, UnmountFlags};
+use rustix::mount::{mount, MountFlags};
 #[cfg(any(target_os = "linux", target_os = "android"))]
 use extattr::{Flags as XattrFlags, lsetxattr};
 
 const SELINUX_XATTR: &str = "security.selinux";
-// Test file to check xattr support
 const XATTR_TEST_FILE: &str = ".xattr_test";
 
 // --- File Logger Implementation ---
@@ -57,7 +56,7 @@ pub fn init_logger(verbose: bool, log_path: &Path) -> Result<()> {
     let file = OpenOptions::new()
         .create(true)
         .write(true)
-        .append(true) // Append mode
+        .append(true)
         .open(log_path)
         .with_context(|| format!("Failed to open log file: {}", log_path.display()))?;
 
@@ -80,7 +79,6 @@ pub fn lsetfilecon<P: AsRef<Path>>(path: P, con: &str) -> Result<()> {
             if io_err.kind() == std::io::ErrorKind::PermissionDenied {
                 log::warn!("SELinux permission denied for {} (ignored)", path.as_ref().display());
             } else {
-                // Don't error out, just warn. Critical for tmpfs fallback logic if xattr fails unexpectedly.
                 log::warn!("Failed to set SELinux context for {}: {}", path.as_ref().display(), io_err);
             }
         }
@@ -108,37 +106,27 @@ pub fn ensure_dir_exists<T: AsRef<Path>>(dir: T) -> Result<()> {
     Ok(())
 }
 
-// --- Storage Utils ---
+// --- Smart Storage Utils ---
 
-/// Checks if the filesystem at `path` supports SELinux extended attributes.
-/// Creates a dummy file, tries to set xattr, and cleans up.
 pub fn is_xattr_supported(path: &Path) -> bool {
     let test_file = path.join(XATTR_TEST_FILE);
     if let Err(_) = write(&test_file, b"test") {
         return false;
     }
-
     let supported = lsetfilecon(&test_file, "u:object_r:system_file:s0").is_ok();
     let _ = remove_file(test_file);
     supported
 }
 
-/// Mounts Tmpfs at the target directory.
 pub fn mount_tmpfs(target: &Path) -> Result<()> {
     ensure_dir_exists(target)?;
-    // Size is usually dynamic, but we can set a generous limit if needed.
-    // Defaulting to shared memory limits.
     mount("tmpfs", target, "tmpfs", MountFlags::empty(), "mode=0755")
         .context("Failed to mount tmpfs")?;
     Ok(())
 }
 
-/// Mounts an ext4 loop image at the target directory.
 pub fn mount_image(image_path: &Path, target: &Path) -> Result<()> {
     ensure_dir_exists(target)?;
-    
-    // We use the shell `mount` command for simplicity with loop devices,
-    // as rustix mount requires setting up the loop device manually via ioctl.
     let status = Command::new("mount")
         .args(["-t", "ext4", "-o", "loop,rw,noatime"])
         .arg(image_path)
@@ -152,19 +140,13 @@ pub fn mount_image(image_path: &Path, target: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Synchronizes a directory from source to dest using `cp -af`.
-/// Used to copy module files from /data/adb/modules to Tmpfs/Image.
 pub fn sync_dir(src: &Path, dst: &Path) -> Result<()> {
     if !src.exists() { return Ok(()); }
     ensure_dir_exists(dst)?;
 
-    // Use cp -af to preserve all attributes (recursive, no dereference, preserve all)
-    // -a: archive mode (recursive, preserves symlinks, perms, times, context)
-    // -f: force
-    // Note: 'cp' in Android usually supports -a (toybox/busybox)
     let status = Command::new("cp")
         .arg("-af")
-        .arg(format!("{}/.", src.display())) // Copy content, not the dir itself
+        .arg(format!("{}/.", src.display()))
         .arg(dst)
         .status()
         .context("Failed to execute cp command")?;
@@ -190,8 +172,5 @@ pub fn ensure_temp_dir(temp_dir: &Path) -> Result<()> {
 }
 
 pub fn select_temp_dir() -> Result<PathBuf> {
-    // Basic implementation for now, usually /debug_ramdisk or similar
-    // Since we are moving to Smart Storage, the logic in main.rs handles the big mounts.
-    // This is for magic mount working dirs.
     Ok(PathBuf::from("/debug_ramdisk/meta_hybrid_work"))
 }

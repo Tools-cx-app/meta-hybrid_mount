@@ -19,8 +19,7 @@ log() {
 
 log "Starting Hybrid Mount..."
 
-# Note: We do NOT mount modules.img here anymore.
-# The Rust binary will decide whether to use Tmpfs or Image.
+# Note: Storage mounting is now handled by the Rust binary (Smart Storage).
 
 # 1. Prepare Rust binary
 BINARY="$MODDIR/meta-hybrid"
