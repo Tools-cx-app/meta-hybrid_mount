@@ -18,7 +18,6 @@ A Hybrid Mount metamodule for KernelSU/Magisk, implementing both OverlayFS and M
   * This provides a standard ext4 environment for module files, ensuring OverlayFS upperdir/workdir compatibility regardless of the underlying /data filesystem (e.g., F2FS).  
 * **Stealth**:  
   * Implements try\_umount logic for **KernelSU** to detach mount points in the global namespace.  
-  * **SUSFS** (via prctl) to register mount points for hiding if the kernel supports it.
 
 ### **Features**
 
@@ -47,7 +46,6 @@ A Hybrid Mount metamodule for KernelSU/Magisk, implementing both OverlayFS and M
   * 这为模块文件提供了标准的 ext4 环境，确保 OverlayFS 的 upperdir/workdir 在任何底层 /data 文件系统（如 F2FS）上都能正常工作。  
 * **隐藏机制**:  
   * 实现了 **KernelSU** 的 try\_umount 逻辑，在全局命名空间中分离挂载点。  
-  * **SUSFS** 支持（通过 prctl），如果内核支持，可注册挂载点以进行隐藏。
 
 ### **特性**
 
