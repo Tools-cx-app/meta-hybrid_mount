@@ -1,8 +1,9 @@
 // meta-hybrid_mount/src/utils.rs
 use std::{
     ffi::CString,
-    fs::{create_dir, create_dir_all, remove_dir, remove_dir_all, remove_file, write, OpenOptions},
+    fs::{self, create_dir, create_dir_all, remove_dir, remove_dir_all, remove_file, write, OpenOptions},
     io::Write,
+    os::unix::fs::{PermissionsExt, MetadataExt, symlink},
     path::{Path, PathBuf},
     process::Command,
     sync::Mutex,
@@ -21,6 +22,7 @@ use extattr::{Flags as XattrFlags, lsetxattr};
 
 const SELINUX_XATTR: &str = "security.selinux";
 const XATTR_TEST_FILE: &str = ".xattr_test";
+const MODULE_CONTEXT: &str = "u:object_r:system_file:s0";
 
 // --- File Logger Implementation ---
 struct FileLogger {
@@ -83,6 +85,7 @@ pub fn lsetfilecon<P: AsRef<Path>>(path: P, con: &str) -> Result<()> {
     #[cfg(any(target_os = "linux", target_os = "android"))]
     {
         if let Err(e) = lsetxattr(&path, SELINUX_XATTR, con, XattrFlags::empty()) {
+            // Log debug but don't fail, some filesystems might not support it
             let io_err = std::io::Error::from(e);
             log::debug!("lsetfilecon: {} -> {} failed: {}", path.as_ref().display(), con, io_err);
         }
@@ -162,28 +165,45 @@ pub fn mount_image(image_path: &Path, target: &Path) -> Result<()> {
     Ok(())
 }
 
+fn native_cp_r(src: &Path, dst: &Path) -> Result<()> {
+    if !dst.exists() {
+        create_dir_all(dst)?;
+        let src_meta = src.metadata()?;
+        fs::set_permissions(dst, src_meta.permissions())?;
+        lsetfilecon(dst, MODULE_CONTEXT)?;
+    }
+
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let ft = entry.file_type()?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+
+        if ft.is_dir() {
+            native_cp_r(&src_path, &dst_path)?;
+        } else if ft.is_symlink() {
+            let link_target = fs::read_link(&src_path)?;
+            if dst_path.exists() {
+                remove_file(&dst_path)?;
+            }
+            symlink(&link_target, &dst_path)?;
+            let _ = lsetfilecon(&dst_path, MODULE_CONTEXT);
+        } else {
+            fs::copy(&src_path, &dst_path)?;
+            let src_meta = src_path.metadata()?;
+            fs::set_permissions(&dst_path, src_meta.permissions())?;
+            lsetfilecon(&dst_path, MODULE_CONTEXT)?;
+        }
+    }
+    Ok(())
+}
+
 pub fn sync_dir(src: &Path, dst: &Path) -> Result<()> {
     if !src.exists() { return Ok(()); }
     ensure_dir_exists(dst)?;
-
-    let status = Command::new("cp")
-        .arg("-af")
-        .arg(format!("{}/.", src.display()))
-        .arg(dst)
-        .status()
-        .context("Failed to execute cp command")?;
-
-    if !status.success() {
-        bail!("Failed to sync {} to {}", src.display(), dst.display());
-    }
-
-    let _ = Command::new("chcon")
-        .arg("-R")
-        .arg("u:object_r:system_file:s0")
-        .arg(dst)
-        .status();
-
-    Ok(())
+    native_cp_r(src, dst).with_context(|| {
+        format!("Failed to natively sync {} to {}", src.display(), dst.display())
+    })
 }
 
 pub fn cleanup_temp_dir(temp_dir: &Path) {
@@ -206,7 +226,6 @@ pub fn select_temp_dir() -> Result<PathBuf> {
     ensure_dir_exists(run_dir)?;
 
     let work_dir = run_dir.join("workdir");
-
     log::debug!("Selected temp dir: {}", work_dir.display());
     
     Ok(work_dir)
