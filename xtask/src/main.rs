@@ -1,12 +1,17 @@
 use std::{
     env,
     fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Command,
 };
 
 use anyhow::{Context, Result};
-use clap::{Parser, ValueEnum};
+use clap::{Parser, Subcommand, ValueEnum};
+use fs_extra::dir::{self, CopyOptions};
+use zip::{write::FileOptions, CompressionMethod};
+
+mod zip_ext;
+use crate::zip_ext::zip_create_from_directory_with_options;
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum Arch {
@@ -54,48 +59,169 @@ struct Cli {
     command: Commands,
 }
 
-#[derive(clap::Subcommand)]
+#[derive(Subcommand)]
 enum Commands {
+    /// Build the full project (WebUI + All Binaries + Zip)
     Build {
-        #[arg(long, default_value = "false")]
+        /// Build in release mode
+        #[arg(long)]
         release: bool,
-        #[arg(long, default_value = "arm64")]
-        arch: Arch,
+        /// Skip WebUI build (for faster iteration)
+        #[arg(long)]
+        skip_webui: bool,
     },
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    let root = project_root();
 
     match cli.command {
-        Commands::Build { release, arch } => {
-            build(release, arch)?;
+        Commands::Build { release, skip_webui } => {
+            build_full(&root, release, skip_webui)?;
         }
     }
     Ok(())
 }
 
-fn build(release: bool, arch: Arch) -> Result<()> {
-    let cargo = env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
-    
-    if !matches!(arch, Arch::Riscv64) {
-        let status = Command::new("rustup")
-            .args(["target", "add", arch.target()])
-            .status()
-            .context("Failed to add rust target")?;
+fn project_root() -> PathBuf {
+    Path::new(&env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(1)
+        .unwrap()
+        .to_path_buf()
+}
 
-        if !status.success() {
-            eprintln!("Warning: Failed to auto-install target {}", arch.target());
-        }
+fn build_full(root: &Path, release: bool, skip_webui: bool) -> Result<()> {
+    let output_dir = root.join("output");
+    let stage_dir = output_dir.join("staging");
+    
+    // 1. Clean output
+    if output_dir.exists() { fs::remove_dir_all(&output_dir)?; }
+    fs::create_dir_all(&stage_dir)?;
+
+    // 2. Build WebUI
+    if !skip_webui {
+        println!(":: Building WebUI...");
+        build_webui(root)?;
+        
+        let webui_dist = root.join("webui/dist");
+        let stage_webui = stage_dir.join("webui");
+        fs::create_dir_all(&stage_webui)?;
+        
+        // Copy WebUI dist content to staging
+        let options = CopyOptions::new().overwrite(true).content_only(true);
+        dir::copy(&webui_dist, &stage_webui, &options)?;
     }
 
+    // 3. Compile Binaries for ALL architectures
+    let archs = [Arch::Arm64, Arch::X86_64, Arch::Riscv64];
+    for arch in archs {
+        println!(":: Compiling Core for {:?}...", arch);
+        compile_core(root, release, arch)?;
+        
+        // Copy binary to staging
+        let bin_name = "meta-hybrid";
+        let profile = if release { "release" } else { "debug" };
+        let src_bin = root.join("target")
+            .join(arch.target())
+            .join(profile)
+            .join(bin_name);
+            
+        let stage_bin_dir = stage_dir.join("binaries").join(arch.android_abi());
+        fs::create_dir_all(&stage_bin_dir)?;
+        fs::copy(&src_bin, stage_bin_dir.join(bin_name))?;
+    }
+
+    // 4. Copy Module Scripts
+    println!(":: Copying module scripts...");
+    let module_src = root.join("module");
+    let options = CopyOptions::new().overwrite(true).content_only(true);
+    dir::copy(&module_src, &stage_dir, &options)?;
+    
+    // Remove dev artifacts from module dir if any
+    let gitignore = stage_dir.join(".gitignore");
+    if gitignore.exists() { fs::remove_file(gitignore)?; }
+
+    // 5. Inject Version
+    let version = get_version(root)?;
+    println!(":: Injecting version: {}", version);
+    update_module_prop(&stage_dir.join("module.prop"), &version)?;
+
+    // 6. Zip It
+    println!(":: Creating Zip...");
+    let zip_file = output_dir.join(format!("Meta-Hybrid-{}.zip", version));
+    let zip_options = FileOptions::default()
+        .compression_method(CompressionMethod::Deflated)
+        .compression_level(Some(9));
+        
+    zip_create_from_directory_with_options(
+        &zip_file,
+        &stage_dir,
+        |_| zip_options,
+    )?;
+
+    println!(":: Build Complete: {}", zip_file.display());
+    Ok(())
+}
+
+fn build_webui(root: &Path) -> Result<()> {
+    // Generate constants first
+    generate_webui_constants(root)?;
+
+    let webui_dir = root.join("webui");
+    let npm = if cfg!(windows) { "npm.cmd" } else { "npm" };
+
+    let status = Command::new(npm)
+        .current_dir(&webui_dir)
+        .arg("install")
+        .status()?;
+    if !status.success() { anyhow::bail!("npm install failed"); }
+
+    let status = Command::new(npm)
+        .current_dir(&webui_dir)
+        .args(["run", "build", "--", "--outDir", "dist"])
+        .status()?;
+    if !status.success() { anyhow::bail!("npm run build failed"); }
+
+    Ok(())
+}
+
+fn generate_webui_constants(root: &Path) -> Result<()> {
+    let path = root.join("webui/src/lib/constants_gen.js");
+    let content = r#"
+export const RUST_PATHS = {
+  CONFIG: "/data/adb/meta-hybrid/config.toml",
+  MODE_CONFIG: "/data/adb/meta-hybrid/module_mode.conf",
+  IMAGE_MNT: "/data/adb/meta-hybrid/img_mnt",
+  DAEMON_STATE: "/data/adb/meta-hybrid/run/daemon_state.json",
+  DAEMON_LOG: "/data/adb/meta-hybrid/daemon.log",
+};
+export const BUILTIN_PARTITIONS = ["system", "vendor", "product", "system_ext", "odm", "oem"];
+"#;
+    fs::create_dir_all(path.parent().unwrap())?;
+    fs::write(path, content)?;
+    Ok(())
+}
+
+fn compile_core(root: &Path, release: bool, arch: Arch) -> Result<()> {
+    let cargo = env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+    
+    // Auto-install target (except RISC-V)
+    if !matches!(arch, Arch::Riscv64) {
+        let _ = Command::new("rustup")
+            .args(["target", "add", arch.target()])
+            .status();
+    }
+
+    // Setup NDK env
     let ndk_home = env::var("ANDROID_NDK_HOME").context("ANDROID_NDK_HOME not set")?;
     let host_os = std::env::consts::OS;
     let host_tag = match host_os {
         "linux" => "linux-x86_64",
         "macos" => "darwin-x86_64",
         "windows" => "windows-x86_64",
-        _ => panic!("Unsupported OS: {}", host_os),
+        _ => panic!("Unsupported OS"),
     };
 
     let toolchain_bin = PathBuf::from(ndk_home)
@@ -115,64 +241,91 @@ fn build(release: bool, arch: Arch) -> Result<()> {
     let ar_path = toolchain_bin.join("llvm-ar");
 
     if !cc_path.exists() {
-        anyhow::bail!("Compiler not found at: {}", cc_path.display());
+        anyhow::bail!("Compiler not found: {}", cc_path.display());
     }
 
-    println!("Building for ABI: {} (API {})", arch.android_abi(), api);
-    println!("Compiler: {}", cc_path.display());
-
     let mut cmd = Command::new(&cargo);
-    cmd.arg("build")
-       .arg("--target").arg(arch.target());
+    cmd.current_dir(root);
+    cmd.arg("build").arg("--target").arg(arch.target());
 
     if matches!(arch, Arch::Riscv64) {
-        cmd.arg("-Z").arg("build-std");
+        cmd.arg("-Z").arg("build-std=std,panic_abort");
     }
 
     if release {
         cmd.arg("--release");
     }
 
-    let current_path = env::var("PATH").unwrap_or_default();
-    let new_path = format!("{}:{}", toolchain_bin.display(), current_path);
-    cmd.env("PATH", new_path);
-
+    // Set Environment Variables
+    let path_val = env::var("PATH").unwrap_or_default();
+    cmd.env("PATH", format!("{}:{}", toolchain_bin.display(), path_val));
+    
     let env_target = arch.target().replace('-', "_");
-    let env_target_upper = env_target.to_uppercase();
-
     cmd.env(format!("CC_{}", env_target), &cc_path);
     cmd.env(format!("AR_{}", env_target), &ar_path);
     cmd.env("CC", &cc_path);
     cmd.env("AR", &ar_path);
+    cmd.env(format!("CARGO_TARGET_{}_LINKER", env_target.to_uppercase()), &cc_path);
 
-    cmd.env(format!("CARGO_TARGET_{}_LINKER", env_target_upper), &cc_path);
-
-    let status = cmd.status().context("Failed to run cargo build")?;
+    let status = cmd.status()?;
     if !status.success() {
-        anyhow::bail!("Build failed");
+        anyhow::bail!("Compilation failed for {}", arch.target());
+    }
+    Ok(())
+}
+
+fn get_version(root: &Path) -> Result<String> {
+    // 1. Try Environment Variable (CI)
+    if let Ok(v) = env::var("META_HYBRID_VERSION") {
+        if !v.is_empty() { return Ok(v); }
     }
 
-    let bin_name = "meta-hybrid"; 
-    let profile = if release { "release" } else { "debug" };
+    // 2. Try git describe
+    let output = Command::new("git").args(["describe", "--tags", "--always", "--dirty"]).output();
+    if let Ok(o) = output {
+        if o.status.success() {
+            return Ok(String::from_utf8(o.stdout)?.trim().to_string());
+        }
+    }
+
+    // 3. Fallback to Cargo.toml
+    let toml_path = root.join("module/config.toml"); // Or Cargo.toml
+    if toml_path.exists() {
+        // Simple parse, assuming `version = "..."` exists
+        let content = fs::read_to_string(toml_path)?;
+        for line in content.lines() {
+            if line.trim().starts_with("version") {
+                if let Some(v) = line.split('"').nth(1) {
+                    return Ok(format!("{}-dev", v));
+                }
+            }
+        }
+    }
+
+    Ok("v0.0.0-unknown".to_string())
+}
+
+fn update_module_prop(path: &Path, version: &str) -> Result<()> {
+    if !path.exists() { return Ok(()); }
+    let content = fs::read_to_string(path)?;
+    let mut new_lines = Vec::new();
     
-    let src_path = PathBuf::from("target")
-        .join(arch.target())
-        .join(profile)
-        .join(bin_name);
+    // Simple hash-based version code
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    version.hash(&mut hasher);
+    let code = (hasher.finish() % 100000) as u32;
 
-    let output_dir = PathBuf::from("output/module_files/binaries")
-        .join(arch.android_abi());
-        
-    fs::create_dir_all(&output_dir).context("Failed to create output directory")?;
-
-    let dst_path = output_dir.join(bin_name);
-
-    if src_path.exists() {
-        fs::copy(&src_path, &dst_path).context("Failed to copy binary to output")?;
-        println!("Artifact copied to: {}", dst_path.display());
-    } else {
-        anyhow::bail!("Build finished but binary not found at: {}", src_path.display());
+    for line in content.lines() {
+        if line.starts_with("version=") {
+            new_lines.push(format!("version={}", version));
+        } else if line.starts_with("versionCode=") {
+            new_lines.push(format!("versionCode={}", code));
+        } else {
+            new_lines.push(line.to_string());
+        }
     }
-
+    fs::write(path, new_lines.join("\n"))?;
     Ok(())
 }

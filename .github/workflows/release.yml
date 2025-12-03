@@ -33,9 +33,6 @@ jobs:
         with:
           ndk-version: r27
 
-      - name: Install Tools
-        run: sudo apt-get update && sudo apt-get install -y zip
-
       - name: Setup Rust Toolchain
         uses: dtolnay/rust-toolchain@nightly
         with:
@@ -44,8 +41,6 @@ jobs:
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: "."
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
@@ -61,61 +56,28 @@ jobs:
           else
             TAG_NAME="v0.0.0-manual.${{ github.run_number }}"
           fi
-          echo "MODULE_VERSION=$TAG_NAME" >> $GITHUB_ENV
+          # 设置环境变量，xtask 会自动读取
+          echo "META_HYBRID_VERSION=$TAG_NAME" >> $GITHUB_ENV
 
-      - name: Generate WebUI Constants
+      - name: Build Release Package
         run: |
-          mkdir -p webui/src/lib
-          cat <<EOF > webui/src/lib/constants_gen.js
-          export const RUST_PATHS = {
-            CONFIG: "/data/adb/meta-hybrid/config.toml",
-            MODE_CONFIG: "/data/adb/meta-hybrid/module_mode.conf",
-            IMAGE_MNT: "/data/adb/meta-hybrid/img_mnt",
-            DAEMON_STATE: "/data/adb/meta-hybrid/run/daemon_state.json",
-            DAEMON_LOG: "/data/adb/meta-hybrid/daemon.log",
-          };
-          export const BUILTIN_PARTITIONS = ["system", "vendor", "product", "system_ext", "odm", "oem"];
-          EOF
-
-      - name: Build WebUI
-        run: |
-          cd webui
-          npm install
-          npm run build -- --outDir dist
-
-      - name: Build Universal Binaries
-        run: |
-          cargo run -p xtask -- build --release --arch arm64
-          cargo run -p xtask -- build --release --arch x86_64
-          cargo run -p xtask -- build --release --arch riscv64
-
-      - name: Assemble Module
-        run: |
-          WORKDIR="output/module_files"
-          mkdir -p "$WORKDIR"
-
-          cp -r module/* "$WORKDIR/"
-          mkdir -p "$WORKDIR/webui"
-          cp -r webui/dist/* "$WORKDIR/webui/"
-
-          sed -i "s/^version=.*/version=${{ env.MODULE_VERSION }}/" "$WORKDIR/module.prop"
-          sed -i "s/^versionCode=.*/versionCode=${{ github.run_number }}/" "$WORKDIR/module.prop"
-
-          ZIP_NAME="Meta-Hybrid-${{ env.MODULE_VERSION }}.zip"
-          cd "$WORKDIR"
-          zip -r "../../output/$ZIP_NAME" .
-          
-          echo "ZIP_PATH=output/$ZIP_NAME" >> $GITHUB_ENV
+          # 编译所有架构并打包
+          cargo run -p xtask -- build --release
 
       - name: Generate Changelog
         id: meta
         run: |
-          ZIP_FILE=$(basename "${{ env.ZIP_PATH }}")
+          ZIP_FILE=$(cd output && ls *.zip | head -n 1)
+          ZIP_NAME=$(basename "$ZIP_FILE")
           REPO="${{ github.repository }}"
-          TAG="${{ env.MODULE_VERSION }}"
-          DOWNLOAD_URL="https://github.com/$REPO/releases/download/$TAG/$ZIP_FILE"
+          TAG="${{ env.META_HYBRID_VERSION }}"
+          
+          echo "ZIP_PATH=output/$ZIP_NAME" >> $GITHUB_ENV
+          
+          DOWNLOAD_URL="https://github.com/$REPO/releases/download/$TAG/$ZIP_NAME"
           CHANGELOG_URL="https://raw.githubusercontent.com/$REPO/master/changelog.md"
           
+          # 生成 update.json 内容
           cat <<EOF > /tmp/update.json
           {
             "version": "$TAG",
@@ -125,6 +87,7 @@ jobs:
           }
           EOF
           
+          # 生成变更日志
           PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
           echo "## $TAG" > /tmp/changelog.md
           echo "" >> /tmp/changelog.md
@@ -157,6 +120,6 @@ jobs:
           git add update.json changelog.md
           
           if ! git diff --staged --quiet; then
-            git commit -m "[skip ci] Update metadata for ${{ env.MODULE_VERSION }}"
+            git commit -m "[skip ci] Update metadata for ${{ env.META_HYBRID_VERSION }}"
             git push origin master
           fi

@@ -17,6 +17,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           submodules: recursive
+          fetch-depth: 0 # 为了 git describe 能获取版本信息
 
       - name: Setup Java
         uses: actions/setup-java@v5
@@ -31,9 +32,6 @@ jobs:
         uses: nttld/setup-ndk@v1
         with:
           ndk-version: r27
-
-      - name: Install Tools
-        run: sudo apt-get update && sudo apt-get install -y zip
 
       - name: Setup Rust Toolchain
         uses: dtolnay/rust-toolchain@nightly
@@ -51,66 +49,21 @@ jobs:
           cache: 'npm'
           cache-dependency-path: webui/package-lock.json
 
-      - name: Generate CI Version
-        id: version
+      - name: Set Version Env
         run: |
-          BASE_VER=$(grep '^version =' module/config.toml | cut -d'"' -f2 || echo "v0.0.0")
-          if [ -z "$BASE_VER" ]; then BASE_VER="v0.0.0"; fi
-          
+          # 自动生成版本号，例如 v0.2.8-ci.42
+          BASE_VER="v0.2.8"
           CI_VER="${BASE_VER}-ci.${{ github.run_number }}"
-          echo "MODULE_VERSION=$CI_VER" >> $GITHUB_ENV
-          echo "Generated Version: $CI_VER"
+          echo "META_HYBRID_VERSION=$CI_VER" >> $GITHUB_ENV
 
-      - name: Generate WebUI Constants
+      - name: Build All
         run: |
-          mkdir -p webui/src/lib
-          cat <<EOF > webui/src/lib/constants_gen.js
-          export const RUST_PATHS = {
-            CONFIG: "/data/adb/meta-hybrid/config.toml",
-            MODE_CONFIG: "/data/adb/meta-hybrid/module_mode.conf",
-            IMAGE_MNT: "/data/adb/meta-hybrid/img_mnt",
-            DAEMON_STATE: "/data/adb/meta-hybrid/run/daemon_state.json",
-            DAEMON_LOG: "/data/adb/meta-hybrid/daemon.log",
-          };
-          export const BUILTIN_PARTITIONS = ["system", "vendor", "product", "system_ext", "odm", "oem"];
-          EOF
-
-      - name: Build WebUI
-        run: |
-          cd webui
-          npm install
-          npm run build -- --outDir dist
-          
-          if [ ! -d "dist" ]; then echo "Error: WebUI dist not found!"; exit 1; fi
-
-      - name: Build Universal Binaries
-        run: |
-          cargo run -p xtask -- build --release --arch arm64
-          cargo run -p xtask -- build --release --arch x86_64
-          cargo run -p xtask -- build --release --arch riscv64
-
-      - name: Assemble Module
-        run: |
-          WORKDIR="output/module_files"
-          mkdir -p "$WORKDIR"
-
-          cp -r module/* "$WORKDIR/"
-          
-          mkdir -p "$WORKDIR/webui"
-          cp -r webui/dist/* "$WORKDIR/webui/"
-
-          sed -i "s/^version=.*/version=${{ env.MODULE_VERSION }}/" "$WORKDIR/module.prop"
-          sed -i "s/^versionCode=.*/versionCode=${{ github.run_number }}/" "$WORKDIR/module.prop"
-
-          ZIP_NAME="Meta-Hybrid-${{ env.MODULE_VERSION }}.zip"
-          cd "$WORKDIR"
-          zip -r "../../output/$ZIP_NAME" .
-          
-          echo "ZIP_PATH=output/$ZIP_NAME" >> $GITHUB_ENV
+          # 一条命令搞定：WebUI + 多架构编译 + 打包
+          cargo run -p xtask -- build --release
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v5
         with:
-          name: Meta-Hybrid-${{ env.MODULE_VERSION }}
-          path: ${{ env.ZIP_PATH }}
+          name: Meta-Hybrid-CI-Build
+          path: output/*.zip
           if-no-files-found: error
