@@ -36,7 +36,7 @@ fn default_moduledir() -> PathBuf {
 }
 
 fn default_mountsource() -> String {
-    String::from("HybridMount")
+    String::from("KSU")
 }
 
 fn deserialize_partitions_flexible<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
