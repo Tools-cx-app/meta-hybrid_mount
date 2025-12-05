@@ -56,8 +56,7 @@
   function handleTouchEnd() {
     if (!isDragging) return;
     isDragging = false;
-
-    const threshold = containerWidth * 0.25 || 60;
+    const threshold = containerWidth * 0.33 || 80;
     const currentIndex = TABS.indexOf(activeTab);
     let nextIndex = currentIndex;
 
