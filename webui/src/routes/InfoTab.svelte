@@ -9,14 +9,32 @@
   const REPO_OWNER = 'YuzakiKokuban';
   const REPO_NAME = 'meta-hybrid_mount';
   const DONATE_LINK = `https://github.com/sponsors/${REPO_OWNER}`; 
+  const CACHE_KEY = 'hm_contributors_cache';
+  const CACHE_DURATION = 1000 * 60 * 60;
 
   let contributors = $state([]);
   let loading = $state(true);
   let error = $state(false);
+
   onMount(async () => {
     await fetchContributors();
   });
+
   async function fetchContributors() {
+    const cached = localStorage.getItem(CACHE_KEY);
+    if (cached) {
+      try {
+        const { data, timestamp } = JSON.parse(cached);
+        if (Date.now() - timestamp < CACHE_DURATION) {
+          contributors = data;
+          loading = false;
+          return;
+        }
+      } catch (e) {
+        localStorage.removeItem(CACHE_KEY);
+      }
+    }
+
     try {
       const res = await fetch(`https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/contributors`);
       if (!res.ok) throw new Error('Failed to fetch list');
@@ -27,20 +45,26 @@
         const hasBotName = user.login.toLowerCase().includes('bot');
         return !isBotType && !hasBotName;
       });
+
       const detailPromises = filteredList.map(async (user) => {
         try {
             const detailRes = await fetch(user.url);
             if (detailRes.ok) {
                 const detail = await detailRes.json();
                 return { ...user, bio: detail.bio, name: detail.name || user.login };
-          
-          }
+            }
         } catch (e) {
             console.warn('Failed to fetch detail for', user.login);
         }
         return user;
       });
+
       contributors = await Promise.all(detailPromises);
+      localStorage.setItem(CACHE_KEY, JSON.stringify({
+        data: contributors,
+        timestamp: Date.now()
+      }));
+
     } catch (e) {
       console.error(e);
       error = true;
@@ -65,7 +89,6 @@
             <rect x="-145" y="20" width="290" height="70" rx="16" ry="16" fill="var(--md-sys-color-surface-variant)" />
             <text x="0" y="65" font-family="var(--md-ref-typeface-mono)" font-size="26" font-weight="bold" fill="var(--md-sys-color-on-surface-variant)" text-anchor="middle" letter-spacing="1">/system</text>
           </g>
-      
           <g transform="translate(-115, -95)">
             <defs>
               <clipPath id="logoBlockClip">
@@ -78,7 +101,6 @@
               <rect x="50" y="50" width="50" height="50" fill="var(--md-sys-color-primary)" />
             </g>
           </g>
-      
           <g transform="translate(15, -95)">
             <rect x="0" y="0" width="100" height="100" rx="16" ry="16" fill="var(--md-sys-color-tertiary-container)" />
           </g>
