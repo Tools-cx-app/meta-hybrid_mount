@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 use anyhow::Result;
+use rayon::prelude::*;
 use crate::{defs, utils, core::inventory::Module};
 
 pub fn perform_sync(modules: &[Module], target_base: &Path) -> Result<()> {
@@ -9,10 +10,10 @@ pub fn perform_sync(modules: &[Module], target_base: &Path) -> Result<()> {
 
     prune_orphaned_modules(modules, target_base)?;
 
-    for module in modules {
+    modules.par_iter().for_each(|module| {
         if module.mode == "magic" {
             log::debug!("Skipping sync for Magic Mount module: {}", module.id);
-            continue;
+            return;
         }
 
         let dst = target_base.join(&module.id);
@@ -43,7 +44,7 @@ pub fn perform_sync(modules: &[Module], target_base: &Path) -> Result<()> {
         } else {
             log::debug!("Skipping empty module: {}", module.id);
         }
-    }
+    });
     
     Ok(())
 }
@@ -53,27 +54,30 @@ fn prune_orphaned_modules(modules: &[Module], target_base: &Path) -> Result<()> 
 
     let active_ids: HashSet<&str> = modules.iter().map(|m| m.id.as_str()).collect();
 
-    for entry in fs::read_dir(target_base)? {
-        let entry = entry?;
+    let entries: Vec<_> = fs::read_dir(target_base)?
+        .filter_map(|e| e.ok())
+        .collect();
+
+    entries.par_iter().for_each(|entry| {
         let path = entry.path();
         let name_os = entry.file_name();
         let name = name_os.to_string_lossy();
 
-        if name == "lost+found" || name == "meta-hybrid" { continue; }
-
-        if !active_ids.contains(name.as_ref()) {
-            log::info!("Pruning orphaned module storage: {}", name);
-            if path.is_dir() {
-                if let Err(e) = fs::remove_dir_all(&path) {
-                    log::warn!("Failed to remove orphan dir {}: {}", name, e);
-                }
-            } else {
-                if let Err(e) = fs::remove_file(&path) {
-                    log::warn!("Failed to remove orphan file {}: {}", name, e);
+        if name != "lost+found" && name != "meta-hybrid" {
+            if !active_ids.contains(name.as_ref()) {
+                log::info!("Pruning orphaned module storage: {}", name);
+                if path.is_dir() {
+                    if let Err(e) = fs::remove_dir_all(&path) {
+                        log::warn!("Failed to remove orphan dir {}: {}", name, e);
+                    }
+                } else {
+                    if let Err(e) = fs::remove_file(&path) {
+                        log::warn!("Failed to remove orphan file {}: {}", name, e);
+                    }
                 }
             }
         }
-    }
+    });
     Ok(())
 }
 
@@ -127,9 +131,10 @@ fn recursive_context_repair(base: &Path, current: &Path) -> Result<()> {
     }
 
     if current.is_dir() {
-        for entry in fs::read_dir(current)? {
-            let entry = entry?;
-            recursive_context_repair(base, &entry.path())?;
+        if let Ok(entries) = fs::read_dir(current) {
+            for entry in entries.flatten() {
+                let _ = recursive_context_repair(base, &entry.path());
+            }
         }
     }
     Ok(())
