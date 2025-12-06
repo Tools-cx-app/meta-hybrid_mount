@@ -91,125 +91,6 @@ fn run() -> Result<()> {
         cli.dry_run,
     );
 
-    // Initialize logging
-    let _log_guard = if config.dry_run {
-        env_logger::builder()
-            .filter_level(if config.verbose { log::LevelFilter::Debug } else { log::LevelFilter::Info })
-            .init();
-        None
-    } else {
-        Some(utils::init_logging(config.verbose, Path::new(defs::DAEMON_LOG_FILE))?)
-    };
-
-    if config.dry_run {
-        log::info!(":: DRY-RUN MODE ACTIVE ::");
-        log::info!("No file system changes will be made.");
-    } else {
-        let camouflage_name = utils::random_kworker_name();
-        if let Err(e) = utils::camouflage_process(&camouflage_name) {
-            log::warn!("Failed to camouflage process: {}", e);
-        }
-        log::info!(">> Initializing Meta-Hybrid Mount Daemon...");
-        log::debug!("Process camouflaged as: {}", camouflage_name);
-    }
-
-    if config.disable_umount {
-        log::warn!("!! Namespace Detach (try_umount) is DISABLED via config.");
-    }
-
-    let module_list = inventory::scan(&config.moduledir, &config)?;
-    log::info!(">> Inventory Scan: Found {} enabled modules.", module_list.len());
-
-    let plan = if config.dry_run {
-        log::info!(">> simulating sync (skipped)");
-        log::info!(">> simulating storage setup (skipped)");
-        log::info!(">> Planning mount strategy using source files...");
-        
-        planner::generate(&config, &module_list, &config.moduledir)?
-    } else {
-        utils::ensure_dir_exists(defs::RUN_DIR)?;
-
-        let mnt_base = PathBuf::from(defs::FALLBACK_CONTENT_DIR);
-        let img_path = Path::new(defs::BASE_DIR).join("modules.img");
-        
-        let storage_handle = storage::setup(&mnt_base, &img_path, config.force_ext4)?;
-        log::info!(">> Storage Backend: [{}]", storage_handle.mode.to_uppercase());
-
-        sync::perform_sync(&module_list, &storage_handle.mount_point)?;
-        
-        planner::generate(&config, &module_list, &storage_handle.mount_point)?
-    };
-
-    plan.print_visuals();
-
-    if config.dry_run {
-        log::info!(">> Dry-run complete. Exiting.");
-        return Ok(());
-    }
-
-    let active_mounts: Vec<String> = plan.overlay_ops
-        .iter()
-        .map(|op| op.partition_name.clone())
-        .collect();
-
-    log::info!(">> Link Start! Executing mount plan...");
-    let exec_result = executor::execute(&plan, &config)?;
-    let mut nuke_active = false;
-    let storage_mode_str;
-    let mount_point_buf;
-    unreachable!("Logic error in refactoring - this line should not be reached due to structure change below");
-}
-
-fn run_safe() -> Result<()> {
-    let cli = Cli::parse();
-
-    if let Some(command) = &cli.command {
-        match command {
-            Commands::GenConfig { output } => { 
-                Config::default().save_to_file(output)?; 
-                return Ok(()); 
-            },
-            Commands::ShowConfig => { 
-                let config = load_config(&cli)?;
-                println!("{}", serde_json::to_string(&config)?); 
-                return Ok(()); 
-            },
-            Commands::SaveConfig { payload } => {
-                let json_bytes = (0..payload.len())
-                    .step_by(2)
-                    .map(|i| u8::from_str_radix(&payload[i..i + 2], 16))
-                    .collect::<Result<Vec<u8>, _>>()
-                    .context("Failed to decode hex payload")?;
-                
-                let config: Config = serde_json::from_slice(&json_bytes)
-                    .context("Failed to parse config JSON")?;
-                
-                config.save_to_file(CONFIG_FILE_DEFAULT)?;
-                println!("Configuration saved successfully.");
-                return Ok(());
-            },
-            Commands::Storage => { 
-                storage::print_status()?; 
-                return Ok(()); 
-            },
-            Commands::Modules => { 
-                let config = load_config(&cli)?;
-                modules::print_list(&config)?; 
-                return Ok(()); 
-            }
-        }
-    }
-
-    let mut config = load_config(&cli)?;
-    config.merge_with_cli(
-        cli.moduledir.clone(), 
-        cli.tempdir.clone(), 
-        cli.mountsource.clone(), 
-        cli.verbose, 
-        cli.partitions.clone(),
-        cli.dry_run,
-    );
-
     // Dry Run Path
     if config.dry_run {
         env_logger::builder()
@@ -310,7 +191,7 @@ fn run_safe() -> Result<()> {
 }
 
 fn main() {
-    if let Err(e) = run_safe() {
+    if let Err(e) = run() {
         log::error!("!! Fatal Error: {:#}", e);
         eprintln!("Fatal Error: {:#}", e);
         std::process::exit(1);
