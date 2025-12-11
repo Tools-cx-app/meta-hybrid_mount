@@ -64,29 +64,29 @@
 <svelte:window onclick={handleOutsideClick} />
 
 <header class="top-bar">
-  <div class="top-bar-content">
-    <h1 class="screen-title">{store.L?.common?.appName}</h1>
-    <div class="top-actions">
-      <button class="btn-icon" onclick={toggleTheme} title={store.L?.common?.theme}>
-        <svg viewBox="0 0 24 24"><path d={getThemeIcon()} fill="currentColor"/></svg>
-      </button>
+  <h1 class="screen-title">{store.L?.common?.appName}</h1>
 
+  <div class="top-actions">
+    <button class="btn-icon" onclick={toggleTheme} title={store.L?.common?.theme}>
+      <svg viewBox="0 0 24 24"><path d={getThemeIcon()} fill="currentColor"/></svg>
+    </button>
+
+    <div class="lang-menu-container">
       <button 
         class="btn-icon" 
         bind:this={langButtonRef}
         onclick={() => showLangMenu = !showLangMenu} 
-        title={store.L?.common?.language}
-      >
+        title={store.L?.common?.language}>
         <svg viewBox="0 0 24 24"><path d={ICONS.translate} fill="currentColor"/></svg>
       </button>
+
+      {#if showLangMenu}
+        <div class="menu-dropdown" bind:this={menuRef}>
+          {#each store.availableLanguages ?? [] as l}
+            <button class="menu-item" onclick={() => setLang(l.code)}>{l.name}</button>
+          {/each}
+        </div>
+      {/if}
     </div>
   </div>
-  
-  {#if showLangMenu}
-    <div class="menu-dropdown" bind:this={menuRef}>
-      {#each store.availableLanguages ?? [] as l}
-        <button class="menu-item" onclick={() => setLang(l.code)}>{l.name}</button>
-      {/each}
-    </div>
-  {/if}
 </header>

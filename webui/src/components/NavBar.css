@@ -1,23 +1,15 @@
 .bottom-nav {
   display: flex;
+  justify-content: space-around;
+  height: 80px;
+  padding: 0 8px;
+  padding-bottom: env(safe-area-inset-bottom);
   background-color: var(--md-sys-color-surface-container);
-  /* Remove border and shadow for a cleaner MD3 look */
-  border-top: none;
-  box-shadow: none; 
-  
-  /* Safe area handling for Android navigation bar */
-  padding-bottom: max(16px, env(safe-area-inset-bottom));
-  padding-top: 16px;
-  padding-left: 24px;
-  padding-right: 24px;
-  
-  overflow-x: auto;
+  border-top: 1px solid var(--md-sys-color-surface-container-highest);
   flex-shrink: 0;
-  -ms-overflow-style: none;
-  gap: 8px;
-  
-  /* Ensure it sits above content (BottomActions has z-index 90) */
   z-index: 100;
+  overflow-x: auto;
+  -ms-overflow-style: none;
 }
 
 .bottom-nav::-webkit-scrollbar {
@@ -26,12 +18,13 @@
 
 .nav-tab {
   flex: 1;
-  min-width: 64px;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   gap: 4px;
+  min-width: 56px;
+  max-width: 120px;
   
   font-size: 12px;
   font-weight: 500;
@@ -41,43 +34,34 @@
   cursor: pointer;
   border: none;
   padding: 0;
+  transition: color 0.2s ease;
 }
 
 .icon-container {
   width: 64px;
   height: 32px;
-  border-radius: 20px; /* MD3 uses fuller pills usually, or 16px is fine */
+  border-radius: 16px;
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: background-color 0.2s cubic-bezier(0.2, 0, 0, 1);
+  transition: background-color 0.2s ease;
 }
 
 .nav-tab svg {
   width: 24px;
   height: 24px;
   fill: currentColor;
-  transition: all 0.2s;
 }
 
-/* Active State */
 .nav-tab.active .icon-container {
   background-color: var(--md-sys-color-secondary-container);
-  width: 64px; /* Ensure width stays stable */
 }
 
 .nav-tab.active {
-  color: var(--md-sys-color-on-surface);
-}
-
-.nav-tab.active svg {
-  fill: var(--md-sys-color-on-secondary-container);
+  color: var(--md-sys-color-on-secondary-container);
 }
 
 .nav-tab.active .label {
-  font-weight: 700;
-}
-
-.nav-tab:active .icon-container {
-  opacity: 0.8;
+  color: var(--md-sys-color-on-surface);
+  font-weight: 600;
 }
