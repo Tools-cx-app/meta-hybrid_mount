@@ -77,7 +77,7 @@
 
 <div class="config-container">
   <section class="config-group">
-    <div class="config-card">
+    <div class="config-card storage-card-fixed">
       <div class="card-header">
         <div class="card-icon">
           <md-icon><svg viewBox="0 0 24 24"><path d={ICONS.storage} /></svg></md-icon>

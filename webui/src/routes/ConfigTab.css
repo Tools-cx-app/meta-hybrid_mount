@@ -21,6 +21,10 @@
   flex-direction: column;
   gap: 16px;
 }
+.storage-card-fixed {
+  min-height: 220px;
+  flex-shrink: 0;
+}
 .card-header {
   display: flex;
   align-items: center;
