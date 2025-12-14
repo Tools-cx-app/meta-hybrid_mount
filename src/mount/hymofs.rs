@@ -1,5 +1,6 @@
 use std::ffi::{CStr, CString};
 use std::fs::{File, OpenOptions};
+use std::io::{BufRead, BufReader};
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::os::unix::io::AsRawFd;
 use std::path::Path;
@@ -12,6 +13,7 @@ use crate::defs::HYMO_PROTOCOL_VERSION;
 const DEV_PATH: &str = "/dev/hymo_ctl";
 const HYMO_IOC_MAGIC: u8 = 0xE0;
 
+// IOCTL 宏定义
 const _IOC_NRBITS: u32 = 8;
 const _IOC_TYPEBITS: u32 = 8;
 const _IOC_SIZEBITS: u32 = 14;
@@ -147,30 +149,49 @@ impl HymoController {
         Ok(Self { file })
     }
 
+    pub fn get_protocol_version() -> Result<i32> {
+        let file = File::open(DEV_PATH)?;
+        let mut reader = BufReader::with_capacity(128, file);
+        let mut line = String::new();
+        reader.read_line(&mut line)?;
+        
+        if let Some(ver_str) = line.trim().strip_prefix("HymoFS Protocol: ") {
+            return ver_str.parse::<i32>().context("Failed to parse protocol version");
+        }
+        
+        bail!("Invalid HymoFS header format: {}", line);
+    }
+
     pub fn check_status() -> HymoFsStatus {
         if !Path::new(DEV_PATH).exists() {
             return HymoFsStatus::NotPresent;
         }
         
-        match Self::new().and_then(|ctl| ctl.get_version()) {
-            Ok(ver) if ver == HYMO_PROTOCOL_VERSION => HymoFsStatus::Available,
+        match Self::get_protocol_version() {
             Ok(ver) => {
-                debug!("HymoFS protocol mismatch: kernel={}, user={}", ver, HYMO_PROTOCOL_VERSION);
-                HymoFsStatus::ProtocolMismatch
+                if ver == HYMO_PROTOCOL_VERSION {
+                    HymoFsStatus::Available
+                } else {
+                    debug!("HymoFS protocol mismatch: kernel={}, user={}", ver, HYMO_PROTOCOL_VERSION);
+                    HymoFsStatus::ProtocolMismatch
+                }
             }
-            Err(_) => HymoFsStatus::NotPresent,
+            Err(e) => {
+                debug!("Failed to read HymoFS protocol: {}", e);
+                HymoFsStatus::NotPresent
+            }
         }
     }
 
-    pub fn get_version(&self) -> Result<i32> {
-        let mut ver: c_int = 0;
+    pub fn get_config_version(&self) -> Result<i32> {
+        let mut dummy: c_int = 0;
         let ret = unsafe {
-            libc::ioctl(self.file.as_raw_fd(), HYMO_IOC_GET_VERSION as c_int, &mut ver)
+            libc::ioctl(self.file.as_raw_fd(), HYMO_IOC_GET_VERSION as c_int, &mut dummy)
         };
         if ret < 0 {
-            bail!("Failed to get version: {}", std::io::Error::last_os_error());
+            bail!("Failed to get config version: {}", std::io::Error::last_os_error());
         }
-        Ok(ver as i32)
+        Ok(ret as i32)
     }
 
     pub fn clear(&self) -> Result<()> {
@@ -291,7 +312,7 @@ impl HymoFs {
     }
 
     pub fn get_version() -> Option<i32> {
-        HymoController::new().and_then(|ctl| ctl.get_version()).ok()
+        HymoController::new().and_then(|ctl| ctl.get_config_version()).ok()
     }
 
     pub fn clear() -> Result<()> {
@@ -345,7 +366,7 @@ impl HymoFs {
             let target_path = target_base.join(relative_path);
             let file_type = entry.file_type();
 
-            if file_type.is_file() || file_type.is_symlink() {
+            if file_type.is_file() || file_type.is_symlink() || file_type.is_dir() {
                 if let Err(e) = ctl.add_rule(
                     &target_path.to_string_lossy(),
                     &current_path.to_string_lossy(),
@@ -392,7 +413,7 @@ impl HymoFs {
             let target_path = target_base.join(relative_path);
             let file_type = entry.file_type();
 
-            if file_type.is_file() || file_type.is_symlink() {
+            if file_type.is_file() || file_type.is_symlink() || file_type.is_dir() {
                 if let Err(e) = ctl.delete_rule(&target_path.to_string_lossy()) {
                     warn!("Failed to delete rule for {}: {}", target_path.display(), e);
                 }
