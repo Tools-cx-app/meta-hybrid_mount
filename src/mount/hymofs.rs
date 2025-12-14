@@ -41,6 +41,7 @@ const fn _iow(type_: u32, nr: u32, size: usize) -> u32 {
 }
 
 const HYMO_IOC_ADD_RULE: i32 = _iow(HYMO_IOC_MAGIC as u32, 1, std::mem::size_of::<HymoIoctlArg>()) as i32;
+#[allow(dead_code)]
 const HYMO_IOC_DEL_RULE: i32 = _iow(HYMO_IOC_MAGIC as u32, 2, std::mem::size_of::<HymoIoctlArg>()) as i32;
 const HYMO_IOC_HIDE_RULE: i32 = _iow(HYMO_IOC_MAGIC as u32, 3, std::mem::size_of::<HymoIoctlArg>()) as i32;
 const HYMO_IOC_CLEAR_ALL: i32 = _io(HYMO_IOC_MAGIC as u32, 5) as i32;

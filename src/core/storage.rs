@@ -6,7 +6,7 @@ use anyhow::{Context, Result, bail};
 use rustix::fs::Mode;
 use rustix::mount::{unmount, UnmountFlags};
 use serde::Serialize;
-use crate::{defs, utils, mount::hymofs::HymoFs};
+use crate::{defs, utils, mount::hymofs::{HymoFs, HymoFsStatus}};
 use crate::core::state::RuntimeState;
 
 const DEFAULT_SELINUX_CONTEXT: &str = "u:object_r:system_file:s0";
@@ -42,7 +42,7 @@ pub fn get_usage(path: &Path) -> (u64, u64, u8) {
 }
 
 pub fn is_hymofs_active() -> bool {
-    HymoFs::is_available()
+    HymoFs::check_status() == HymoFsStatus::Available
 }
 
 pub fn setup(mnt_base: &Path, img_path: &Path, force_ext4: bool, mount_source: &str) -> Result<StorageHandle> {
@@ -180,7 +180,7 @@ pub fn print_status() -> Result<()> {
         usage_percent: percent,
         total_size: total,
         used_size: used,
-        hymofs_available: HymoFs::is_available(),
+        hymofs_available: HymoFs::check_status() == HymoFsStatus::Available,
         hymofs_version: HymoFs::get_version(),
     };
 
