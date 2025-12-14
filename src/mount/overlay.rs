@@ -8,7 +8,9 @@ use std::ffi::CString;
 use procfs::process::Process;
 use rustix::{fd::AsFd, fs::CWD, mount::*};
 use crate::defs::{KSU_OVERLAY_SOURCE, RUN_DIR};
-use crate::utils::send_unmountable;
+#[cfg(any(target_os = "linux", target_os = "android"))]
+use crate::try_umount::send_unmountable;
+
 const PAGE_LIMIT: usize = 4000;
 pub fn mount_overlayfs(
     lower_dirs: &[String],
@@ -140,6 +142,7 @@ fn do_mount_overlay(
         ).map_err(|mount_err| anyhow::anyhow!("Legacy mount failed: {} (fsopen error: {})", mount_err, fsopen_err))?;
     }
     if !disable_umount {
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         let _ = send_unmountable(dest.as_ref());
     }
     Ok(())
@@ -160,6 +163,7 @@ pub fn bind_mount(from: impl AsRef<Path>, to: impl AsRef<Path>, disable_umount: 
         MoveMountFlags::MOVE_MOUNT_F_EMPTY_PATH,
     )?;
     if !disable_umount {
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         let _ = send_unmountable(to.as_ref());
     }
     Ok(())

@@ -2,6 +2,8 @@ mod conf;
 mod core;
 mod defs;
 mod mount;
+#[cfg(any(target_os = "linux", target_os = "android"))]
+mod try_umount;
 mod utils;
 
 use std::path::{Path, PathBuf};
