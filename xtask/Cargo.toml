@@ -6,4 +6,5 @@ edition = "2021"
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
 fs_extra = "1.3"
+nix = { version = "0.30.1", features = ["fs", "ioctl", "mount"] }
 zip = "6.0"
