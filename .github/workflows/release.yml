@@ -150,6 +150,8 @@ jobs:
           # Ensure we are on branch to push
           git fetch origin master
           git checkout master
+
+          sed -i "s/version: 'v.*',/version: '${{ env.META_HYBRID_VERSION }}',/" webui/src/lib/store.svelte.js
           
           mv /tmp/update.json update.json
           mv /tmp/changelog.md changelog.md
