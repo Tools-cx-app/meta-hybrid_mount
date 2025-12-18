@@ -66,6 +66,8 @@ pub struct HymoKernelStatus {
     pub protocol_version: i32,
     pub config_version: i32,
     pub rules: HymoRules,
+    pub stealth_active: bool,
+    pub debug_active: bool,
 }
 
 pub struct HymoFs;
@@ -104,7 +106,6 @@ impl HymoFs {
         unsafe { ioc_clear_all(file.as_raw_fd()) }
             .context("HymoFS clear failed")?;
 
-        // Enable debug mode by default (executor will override)
         let debug_val: i32 = 1;
         unsafe { ioc_set_debug(file.as_raw_fd(), &debug_val) }.ok();
         
@@ -164,7 +165,7 @@ impl HymoFs {
     #[allow(dead_code)]
     pub fn list_active_rules() -> Result<String> {
         let file = Self::open_dev()?;
-        let capacity = 128 * 1024;
+        let capacity = 32 * 1024;
         let mut buffer = vec![0u8; capacity];
         let mut arg = HymoIoctlListArg {
             buf: buffer.as_mut_ptr() as *mut std::ffi::c_char,
@@ -186,10 +187,23 @@ impl HymoFs {
             });
         }
 
-        let raw_info = Self::list_active_rules().unwrap_or_default();
         let mut status = HymoKernelStatus {
             available: true,
+            stealth_active: false,
+            debug_active: false,
             ..Default::default()
+        };
+
+        if let Some(v) = Self::get_version() {
+            status.protocol_version = v;
+        }
+
+        let raw_info = match Self::list_active_rules() {
+            Ok(info) => info,
+            Err(e) => {
+                warn!("HymoFS list rules failed: {}", e);
+                return Ok(status);
+            }
         };
 
         for line in raw_info.lines() {
@@ -199,10 +213,12 @@ impl HymoFs {
             match parts[0] {
                 "HymoFS" => {
                     if parts.len() >= 3 {
-                        if parts[1] == "Protocol:" {
+                        if parts[1] == "Protocol:" && status.protocol_version == 0 {
                             status.protocol_version = parts[2].parse().unwrap_or(0);
                         } else if parts[1] == "Config" && parts.get(2) == Some(&"Version:") {
-                            status.config_version = parts[3].parse().unwrap_or(0);
+                            if let Some(ver_str) = parts.get(3) {
+                                status.config_version = ver_str.parse().unwrap_or(0);
+                            }
                         }
                     }
                 },
