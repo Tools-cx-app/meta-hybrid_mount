@@ -18,7 +18,6 @@
     "status": "状态",
     "config": "配置",
     "modules": "模块",
-    "hymo": "HymoFS",
     "logs": "日志",
     "info": "关于"
   },
@@ -115,16 +114,6 @@
         "ignore": "忽略"
       }
     }
-  },
-  "hymo": {
-    "title": "HymoFS 状态",
-    "notAvailable": "HymoFS 内核模块未检测到或未激活。",
-    "stealthDesc": "隐藏控制设备并混淆挂载ID。",
-    "debugDesc": "输出详细的内核调试日志。",
-    "reorderBtn": "重排挂载ID",
-    "reorderConfirm": "此操作将重新生成随机的挂载ID以混淆检测，是否继续？",
-    "reorderSuccess": "挂载ID已混淆",
-    "reorderFail": "命令执行失败"
   },
   "logs": {
     "title": "运行日志",
