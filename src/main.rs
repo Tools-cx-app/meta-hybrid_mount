@@ -18,10 +18,9 @@ use core::{
     executor,
     inventory,
     planner,
-    state::RuntimeState,
     storage,
-    sync,
     modules,
+    OryzaEngine, 
 };
 
 #[global_allocator]
@@ -219,7 +218,7 @@ fn main() -> Result<()> {
             config.disable_umount = true;
         }
     }
-
+    
     if config.dry_run {
         env_logger::builder()
             .filter_level(if config.verbose { log::LevelFilter::Debug } else { log::LevelFilter::Info })
@@ -294,82 +293,17 @@ fn main() -> Result<()> {
     let mnt_base = PathBuf::from(defs::FALLBACK_CONTENT_DIR);
     let img_path = Path::new(defs::BASE_DIR).join("modules.img");
     
-    let storage_handle = storage::setup(&mnt_base, &img_path, config.force_ext4, &config.mountsource)
-        .context("Storage backend setup failed")?;
-    log::info!(">> Storage Backend: [{}]", storage_handle.mode.to_uppercase());
+    OryzaEngine::new(config)
+        .init_storage(&mnt_base, &img_path)
+        .context("Failed to initialize storage")?
+        .scan_and_sync()
+        .context("Failed to scan and sync modules")?
+        .generate_plan()
+        .context("Failed to generate mount plan")?
+        .execute()
+        .context("Failed to execute mount plan")?
+        .finalize()
+        .context("Failed to finalize boot sequence")?;
 
-    if config.hymofs_stealth && mount::hymofs::HymoFs::is_available() {
-        if let Err(e) = mount::hymofs::HymoFs::hide_overlay_xattrs(&storage_handle.mount_point.to_string_lossy()) {
-            log::warn!("Failed to hide overlay xattrs on storage: {}", e);
-        } else {
-            log::info!(">> HymoFS: Hidden overlay xattrs on {}", storage_handle.mount_point.display());
-        }
-    }
-
-    let module_list = inventory::scan(&config.moduledir, &config)
-        .context("Failed to scan module directory")?;
-    log::info!(">> Inventory Scan: Found {} enabled modules.", module_list.len());
-    
-    sync::perform_sync(&module_list, &storage_handle.mount_point)
-        .context("Module synchronization failed")?;
-
-    let plan = planner::generate(&config, &module_list, &storage_handle.mount_point)
-        .context("Mount plan generation failed")?;
-    plan.print_visuals();
-
-    let active_mounts: Vec<String> = plan.overlay_ops
-        .iter()
-        .map(|op| op.partition_name.clone())
-        .collect();
-
-    log::info!(">> Link Start! Executing mount plan...");
-    
-    let exec_result = executor::execute(&plan, &config)
-        .context("Mount plan execution failed")?;
-
-    let final_magic_ids = exec_result.magic_module_ids;
-    
-    let mut nuke_active = false;
-    if storage_handle.mode == "ext4" && config.enable_nuke {
-        log::info!(">> Engaging Paw Pad Protocol (Stealth)...");
-        match utils::ksu_nuke_sysfs(storage_handle.mount_point.to_string_lossy().as_ref()) {
-            Ok(_) => {
-                log::info!(">> Success: Paw Pad active. Sysfs traces purged.");
-                nuke_active = true;
-            },
-            Err(e) => {
-                log::warn!("!! Paw Pad failure: {:#}", e);
-            }
-        }
-    }
-
-    modules::update_description(
-        &storage_handle.mode, 
-        nuke_active, 
-        exec_result.overlay_module_ids.len(), 
-        final_magic_ids.len(),
-        exec_result.hymo_module_ids.len()
-    );
-
-    let storage_stats = storage::get_usage(&storage_handle.mount_point);
-    let hymofs_available = storage::is_hymofs_active();
-    
-    let state = RuntimeState::new(
-        storage_handle.mode,
-        storage_handle.mount_point,
-        exec_result.overlay_module_ids,
-        final_magic_ids,
-        exec_result.hymo_module_ids,
-        nuke_active,
-        active_mounts,
-        storage_stats,
-        hymofs_available
-    );
-
-    if let Err(e) = state.save() {
-        log::error!("Failed to save runtime state: {:#}", e);
-    }
-
-    log::info!(">> System operational. Mount sequence complete.");
     Ok(())
 }
