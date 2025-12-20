@@ -7,6 +7,7 @@ use crate::{defs, utils, core::inventory::{Module, MountMode}};
 
 pub fn perform_sync(modules: &[Module], target_base: &Path) -> Result<()> {
     log::info!("Starting smart module sync...");
+    
     utils::ensure_dir_exists(defs::HYMO_MIRROR_DIR)?;
     
     prune_orphaned_modules(modules, target_base)?;
@@ -17,6 +18,7 @@ pub fn perform_sync(modules: &[Module], target_base: &Path) -> Result<()> {
             log::debug!("Skipping sync for Magic Mount module: {}", module.id);
             return;
         }
+
         let dst_root = if matches!(module.rules.default_mode, MountMode::HymoFs) {
             Path::new(defs::HYMO_MIRROR_DIR)
         } else {

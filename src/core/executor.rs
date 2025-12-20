@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
-use anyhow::{Result};
+use anyhow::Result;
 use rustix::mount::{mount_change, MountPropagationFlags};
 use crate::{
     conf::config::Config, 
@@ -66,6 +66,11 @@ pub struct ExecutionResult {
     pub magic_module_ids: Vec<String>,
 }
 
+struct HymoTask {
+    target: PathBuf,
+    source: PathBuf,
+}
+
 pub fn execute(plan: &MountPlan, config: &Config) -> Result<ExecutionResult> {
     if HymoFs::is_available() {
         let _ = HymoFs::clear();
@@ -75,7 +80,21 @@ pub fn execute(plan: &MountPlan, config: &Config) -> Result<ExecutionResult> {
     }
 
     let mut stats = ExecutionStats::default();
-    execute_node(&plan.root, config, &mut stats)?;
+    let mut hymo_tasks = Vec::new();
+
+    execute_node(&plan.root, config, &mut stats, &mut hymo_tasks)?;
+
+    if HymoFs::is_available() && !hymo_tasks.is_empty() {
+        for task in hymo_tasks {
+            if let Err(e) = HymoFs::add_rule(
+                &task.target.to_string_lossy(),
+                &task.source.to_string_lossy(),
+                0
+            ) {
+                log::warn!("HymoFS add_rule failed for {}: {}", task.target.display(), e);
+            }
+        }
+    }
 
     let mut overlay_ids: Vec<String> = stats.overlay.into_iter().collect();
     let mut hymo_ids: Vec<String> = stats.hymo.into_iter().collect();
@@ -92,11 +111,19 @@ pub fn execute(plan: &MountPlan, config: &Config) -> Result<ExecutionResult> {
     })
 }
 
-fn execute_node(node: &FsNode, config: &Config, stats: &mut ExecutionStats) -> Result<()> {
+fn execute_node(
+    node: &FsNode, 
+    config: &Config, 
+    stats: &mut ExecutionStats,
+    hymo_tasks: &mut Vec<HymoTask>
+) -> Result<()> {
     match &node.strategy {
         MountStrategy::Unresolved | MountStrategy::Passthrough => {
-            for child in node.children.values() {
-                execute_node(child, config, stats)?;
+            let mut children: Vec<_> = node.children.values().collect();
+            children.sort_by(|a, b| a.name.cmp(&b.name));
+            
+            for child in children {
+                execute_node(child, config, stats, hymo_tasks)?;
             }
         },
         MountStrategy::Overlay { lowerdirs } => {
@@ -109,15 +136,10 @@ fn execute_node(node: &FsNode, config: &Config, stats: &mut ExecutionStats) -> R
         },
         MountStrategy::Hymo { source } => {
             if let Some(m) = node.mutations.first() { stats.hymo.insert(m.module_id.clone()); }
-            if HymoFs::is_available() {
-                if let Err(e) = HymoFs::add_rule(
-                    &node.path.to_string_lossy(),
-                    &source.to_string_lossy(),
-                    0
-                ) {
-                    log::warn!("HymoFS add_rule failed: {}", e);
-                }
-            }
+            hymo_tasks.push(HymoTask {
+                target: node.path.clone(),
+                source: source.clone(),
+            });
         },
         MountStrategy::Bind { source } => {
             if let Some(m) = node.mutations.first() { stats.magic.insert(m.module_id.clone()); }
@@ -139,8 +161,11 @@ fn execute_node(node: &FsNode, config: &Config, stats: &mut ExecutionStats) -> R
                 return Ok(());
             }
 
-            for child in node.children.values() {
-                execute_node(child, config, stats)?;
+            let mut children: Vec<_> = node.children.values().collect();
+            children.sort_by(|a, b| a.name.cmp(&b.name));
+
+            for child in children {
+                execute_node(child, config, stats, hymo_tasks)?;
             }
             let _ = mount_change(&node.path, MountPropagationFlags::PRIVATE);
         },

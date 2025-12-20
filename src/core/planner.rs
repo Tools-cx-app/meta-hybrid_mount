@@ -79,6 +79,7 @@ pub fn generate(
         };
 
         let mut content_path = search_root.join(&module.id);
+        
         if !content_path.exists() {
             content_path = module.source_path.clone();
         }
@@ -215,26 +216,13 @@ fn resolve_tree(node: &mut FsNode, config: &Config) {
         }
     }
 
-    if let Some(mut_) = top_mutation {
-        match mut_.file_type {
-            FileType::Directory => {
-                node.strategy = MountStrategy::Magic; 
-            },
-            FileType::File | FileType::Symlink => {
-                node.strategy = MountStrategy::Bind { source: mut_.source_path.clone() };
-            },
-        }
-        return;
-    }
-
     let has_modified_children = node.children.values().any(|c| !matches!(c.strategy, MountStrategy::Passthrough));
     
     if has_modified_children {
-        if can_overlay {
-            node.strategy = MountStrategy::Overlay { lowerdirs: Vec::new() };
-        } else {
-            node.strategy = MountStrategy::Magic;
-        }
+        // 修复：如果子节点有修改，但当前节点没有可用的 lowerdirs (Overlay内容)，
+        // 强制使用 Magic 策略。
+        // 之前的逻辑试图创建一个空的 Overlay，导致 "Invalid argument (os error 22)"。
+        node.strategy = MountStrategy::Magic;
     } else {
         node.strategy = MountStrategy::Passthrough;
     }
