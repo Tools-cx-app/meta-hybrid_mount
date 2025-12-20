@@ -1,17 +1,22 @@
+use std::collections::HashSet;
+use std::fs;
 use std::path::{Path, PathBuf};
-use std::collections::{HashMap, HashSet};
-use anyhow::Result;
-use rayon::prelude::*;
-use walkdir::WalkDir;
-use rustix::mount::UnmountFlags;
-
+use anyhow::{Context, Result};
+use rustix::mount::{mount_change, MountPropagationFlags};
 use crate::{
-    conf::config, 
-    mount::{magic, overlay, hymofs::HymoFs}, 
+    conf::config::Config, 
+    mount::{overlay, hymofs::HymoFs, magic}, 
     utils,
-    core::planner::MountPlan,
+    core::{planner::MountPlan, tree::{FsNode, MountStrategy, FileType}},
     defs
 };
+
+#[derive(Default)]
+struct ExecutionStats {
+    pub overlay: HashSet<String>,
+    pub hymo: HashSet<String>,
+    pub magic: HashSet<String>,
+}
 
 pub struct ExecutionResult {
     pub overlay_module_ids: Vec<String>,
@@ -19,246 +24,127 @@ pub struct ExecutionResult {
     pub magic_module_ids: Vec<String>,
 }
 
-pub enum DiagnosticLevel {
-    #[allow(dead_code)]
-    Info,
-    Warning,
-    Critical,
-}
-
-pub struct DiagnosticIssue {
-    pub level: DiagnosticLevel,
-    pub context: String,
-    pub message: String,
-}
-
-fn extract_id(path: &Path) -> Option<String> {
-    path.parent()
-        .and_then(|p| p.file_name())
-        .map(|s| s.to_string_lossy().to_string())
-}
-
-fn extract_module_root(partition_path: &Path) -> Option<PathBuf> {
-    partition_path.parent().map(|p| p.to_path_buf())
-}
-
-struct OverlayResult {
-    magic_roots: Vec<PathBuf>,
-    fallback_ids: Vec<String>,
-    success_records: Vec<(PathBuf, String)>,
-}
-
-pub fn diagnose_plan(plan: &MountPlan) -> Vec<DiagnosticIssue> {
-    let mut issues = Vec::new();
-    for op in &plan.overlay_ops {
-        let target = Path::new(&op.target);
-        if !target.exists() {
-            issues.push(DiagnosticIssue {
-                level: DiagnosticLevel::Critical,
-                context: op.partition_name.clone(),
-                message: format!("Target mount point does not exist: {}", op.target),
-            });
-        }
+pub fn execute(plan: &MountPlan, config: &Config) -> Result<ExecutionResult> {
+    if HymoFs::is_available() {
+        let _ = HymoFs::clear();
+        let _ = HymoFs::set_stealth(config.hymofs_stealth);
+        let _ = HymoFs::set_debug(config.hymofs_debug);
+        let _ = utils::ensure_dir_exists(defs::HYMO_MIRROR_DIR);
     }
-    let all_layers: Vec<(String, &PathBuf)> = plan.overlay_ops.iter()
-        .flat_map(|op| {
-            op.lowerdirs.iter().map(move |path| {
-                let mod_id = extract_id(path).unwrap_or_else(|| "unknown".into());
-                (mod_id, path)
-            })
-        })
-        .collect();
-    for (mod_id, layer_path) in all_layers {
-        if !layer_path.exists() { continue; }
-        for entry in WalkDir::new(layer_path) {
-            if let Ok(entry) = entry {
-                if entry.path_is_symlink() {
-                    if let Ok(target) = std::fs::read_link(entry.path()) {
-                        if target.is_absolute() {
-                            if !target.exists() {
-                                issues.push(DiagnosticIssue {
-                                    level: DiagnosticLevel::Warning,
-                                    context: mod_id.clone(),
-                                    message: format!("Dead absolute symlink: {} -> {}", 
-                                        entry.path().display(), target.display()),
-                                });
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    issues
-}
 
-pub fn execute(plan: &MountPlan, config: &config::Config) -> Result<ExecutionResult> {
-    let mut magic_queue = plan.magic_module_paths.clone();
-    let mut global_success_map: HashMap<PathBuf, HashSet<String>> = HashMap::new();
-    let mut final_overlay_ids = HashSet::new();
-    let mut final_hymo_ids = HashSet::new();
+    let mut stats = ExecutionStats::default();
+    execute_node(&plan.root, config, &mut stats)?;
+
+    let mut overlay_ids: Vec<String> = stats.overlay.into_iter().collect();
+    let mut hymo_ids: Vec<String> = stats.hymo.into_iter().collect();
+    let mut magic_ids: Vec<String> = stats.magic.into_iter().collect();
     
-    plan.overlay_module_ids.iter().for_each(|id| { final_overlay_ids.insert(id.clone()); });
-    plan.hymo_module_ids.iter().for_each(|id| { final_hymo_ids.insert(id.clone()); });
-
-    if !plan.hymo_ops.is_empty() {
-         if HymoFs::is_available() {
-            log::info!(">> Phase 1: HymoFS Injection...");
-            if let Err(e) = HymoFs::clear() {
-                log::warn!("Failed to reset HymoFS rules: {}", e);
-            }
-            if let Err(e) = HymoFs::set_stealth(config.hymofs_stealth) {
-                log::warn!("Failed to set HymoFS stealth mode to {}: {}", config.hymofs_stealth, e);
-            }
-            if let Err(e) = HymoFs::set_debug(config.hymofs_debug) {
-                log::warn!("Failed to set HymoFS debug mode to {}: {}", config.hymofs_debug, e);
-            }
-
-            if let Err(e) = utils::ensure_dir_exists(defs::HYMO_MIRROR_DIR) {
-                log::warn!("Failed to create hymo mirror dir: {}", e);
-            }
-
-            for op in &plan.hymo_ops {
-                let part_name = op.target.file_name()
-                    .map(|s| s.to_string_lossy().to_string())
-                    .unwrap_or_else(|| "unknown".to_string());
-                
-                let mirror_base = Path::new(defs::HYMO_MIRROR_DIR).join(&op.module_id);
-                if let Err(e) = std::fs::create_dir_all(&mirror_base) {
-                    log::warn!("Failed to create mirror dir for {}: {}", op.module_id, e);
-                    continue;
-                }
-                
-                if let Err(e) = overlay::bind_mount(&op.source, &mirror_base, true) {
-                    log::warn!("Failed to bind mount mirror for {}: {}", op.module_id, e);
-                }
-
-                log::debug!("Injecting {} (via mirror) -> {}", op.module_id, op.target.display());
-                
-                match HymoFs::inject_directory(&op.target, &mirror_base) {
-                    Ok(_) => {
-                        if let Some(root) = extract_module_root(&op.source) {
-                            global_success_map.entry(root).or_default().insert(part_name);
-                        }
-                    },
-                    Err(e) => {
-                        log::error!("HymoFS failed for {}: {}. Fallback to Magic Mount.", op.module_id, e);
-                        if let Some(root) = extract_module_root(&op.source) {
-                            magic_queue.push(root);
-                        }
-                        final_hymo_ids.remove(&op.module_id);
-                    }
-                }
-            }
-        } else {
-            log::warn!("!! HymoFS requested but kernel support is missing. Falling back to Magic Mount.");
-            for op in &plan.hymo_ops {
-                if let Some(root) = extract_module_root(&op.source) {
-                    magic_queue.push(root);
-                }
-                final_hymo_ids.remove(&op.module_id);
-            }
-        }
-    }
-
-    log::info!(">> Phase 2: OverlayFS Execution...");
-    let overlay_results: Vec<OverlayResult> = plan.overlay_ops.par_iter()
-        .map(|op| {
-            let lowerdir_strings: Vec<String> = op.lowerdirs.iter()
-                .map(|p: &PathBuf| p.display().to_string())
-                .collect();
-            log::info!("Mounting {} [OVERLAY] ({} layers)", op.target, lowerdir_strings.len());
-            if let Err(e) = overlay::mount_overlay(&op.target, &lowerdir_strings, None, None, config.disable_umount) {
-                log::warn!("OverlayFS failed for {}: {}. Triggering fallback.", op.target, e);
-                let mut local_magic = Vec::new();
-                let mut local_fallback_ids = Vec::new();
-                for layer_path in &op.lowerdirs {
-                    if let Some(root) = extract_module_root(layer_path) {
-                        local_magic.push(root.clone());
-                        if let Some(id) = extract_id(layer_path) {
-                            local_fallback_ids.push(id);
-                        }
-                    }
-                }
-                return OverlayResult {
-                    magic_roots: local_magic,
-                    fallback_ids: local_fallback_ids,
-                    success_records: Vec::new(),
-                };
-            }
-            let mut successes = Vec::new();
-            for layer_path in &op.lowerdirs {
-                 if let Some(root) = extract_module_root(layer_path) {
-                     successes.push((root, op.partition_name.clone()));
-                 }
-            }
-            OverlayResult {
-                magic_roots: Vec::new(),
-                fallback_ids: Vec::new(),
-                success_records: successes,
-            }
-        })
-        .collect();
-
-    for res in overlay_results {
-        magic_queue.extend(res.magic_roots);
-        for id in res.fallback_ids {
-            final_overlay_ids.remove(&id); 
-        }
-        for (root, partition) in res.success_records {
-            global_success_map.entry(root)
-                .or_default()
-                .insert(partition);
-        }
-    }
-
-    magic_queue.sort();
-    magic_queue.dedup();
-    let mut final_magic_ids = Vec::new();
-
-    if !magic_queue.is_empty() {
-        let tempdir = utils::select_temp_dir()?;
-
-        for path in &magic_queue {
-            if let Some(name) = path.file_name() {
-                final_magic_ids.push(name.to_string_lossy().to_string());
-            }
-        }
-        
-        log::info!(">> Phase 3: Magic Mount (Fallback) using {}", tempdir.display());
-        
-        if !tempdir.exists() {
-            std::fs::create_dir_all(&tempdir)?;
-        }
-        utils::mount_tmpfs(&tempdir, "tmpfs")?;
-
-        if let Err(e) = magic::mount_partitions(
-            &tempdir, 
-            &magic_queue, 
-            &config.mountsource, 
-            &config.partitions, 
-            global_success_map, 
-            config.disable_umount
-        ) {
-            log::error!("Magic Mount critical failure: {:#}", e);
-            final_magic_ids.clear();
-        }
-
-        let _ = rustix::mount::unmount(&tempdir, UnmountFlags::DETACH);
-    }
-
-    let mut result_overlay = final_overlay_ids.into_iter().collect::<Vec<_>>();
-    let mut result_hymo = final_hymo_ids.into_iter().collect::<Vec<_>>();
-    let mut result_magic = final_magic_ids;
-    
-    result_overlay.sort();
-    result_hymo.sort();
-    result_magic.sort();
-    result_magic.dedup();
+    overlay_ids.sort();
+    hymo_ids.sort();
+    magic_ids.sort();
 
     Ok(ExecutionResult {
-        overlay_module_ids: result_overlay,
-        hymo_module_ids: result_hymo,
-        magic_module_ids: result_magic,
+        overlay_module_ids: overlay_ids,
+        hymo_module_ids: hymo_ids,
+        magic_module_ids: magic_ids,
     })
+}
+
+fn execute_node(node: &FsNode, config: &Config, stats: &mut ExecutionStats) -> Result<()> {
+    match &node.strategy {
+        MountStrategy::Unresolved | MountStrategy::Passthrough => {
+            for child in node.children.values() {
+                execute_node(child, config, stats)?;
+            }
+        },
+        MountStrategy::Overlay { lowerdirs } => {
+            for m in &node.mutations { stats.overlay.insert(m.module_id.clone()); }
+            ensure_mountpoint(&node.path, FileType::Directory);
+            let lower_strings: Vec<String> = lowerdirs.iter().map(|p| p.to_string_lossy().to_string()).collect();
+            if let Err(e) = overlay::mount_overlay(&node.path.to_string_lossy(), &lower_strings, None, None, config.disable_umount) {
+                log::warn!("Overlay failed for {}: {}", node.path.display(), e);
+            }
+            // Overlay 覆盖了整个目录，无需递归子节点
+        },
+        MountStrategy::Hymo { source } => {
+            if let Some(m) = node.mutations.first() { stats.hymo.insert(m.module_id.clone()); }
+            if HymoFs::is_available() {
+                // 物理复制源文件到 Mirror，确保稳定性
+                match copy_hymo_source(source, &node.path) {
+                    Ok(copied_source) => {
+                        // 注入规则。注意：这里只处理当前节点（文件）。
+                        // Planner 已经确保了目录类型的节点不会被分配为 Hymo 策略。
+                        if let Err(e) = HymoFs::add_rule(
+                            &node.path.to_string_lossy(),
+                            &copied_source.to_string_lossy(),
+                            0
+                        ) {
+                            log::warn!("HymoFS add_rule failed: {}", e);
+                        }
+                    },
+                    Err(e) => log::warn!("Failed to prepare Hymo source: {}", e),
+                }
+            }
+        },
+        MountStrategy::Bind { source } => {
+            if let Some(m) = node.mutations.first() { stats.magic.insert(m.module_id.clone()); }
+            let ft = if source.is_dir() { FileType::Directory } else { FileType::File };
+            ensure_mountpoint(&node.path, ft);
+            if let Err(e) = overlay::bind_mount(source, &node.path, config.disable_umount) {
+                log::warn!("Bind failed {} -> {}: {}", source.display(), node.path.display(), e);
+            }
+        },
+        MountStrategy::Magic => {
+            if let Some(m) = node.mutations.first() { stats.magic.insert(m.module_id.clone()); }
+            // 收集当前目录下一级需要由模块修改的文件名
+            let exclusions: HashSet<String> = node.children.iter()
+                .filter(|(_, child)| !matches!(child.strategy, MountStrategy::Passthrough))
+                .map(|(name, _)| name.clone())
+                .collect();
+            
+            // 构建 tmpfs 骨架，跳过 exclusions 中的文件
+            if let Err(e) = magic::populate_skeleton(&node.path, &exclusions, config.disable_umount) {
+                log::error!("Skeleton failed for {}: {}", node.path.display(), e);
+                return Ok(());
+            }
+
+            // 递归处理子节点，将模块文件挂载到刚才跳过的空位上
+            for child in node.children.values() {
+                execute_node(child, config, stats)?;
+            }
+            let _ = mount_change(&node.path, MountPropagationFlags::PRIVATE);
+        },
+    }
+    Ok(())
+}
+
+fn copy_hymo_source(source: &Path, target_path: &Path) -> Result<PathBuf> {
+    let relative = target_path.to_string_lossy().trim_start_matches('/').to_string();
+    let mirror_path = Path::new(defs::HYMO_MIRROR_DIR).join(relative);
+    
+    if let Some(parent) = mirror_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    if source.is_dir() {
+        utils::sync_dir(source, &mirror_path)
+            .with_context(|| format!("Failed to copy Hymo directory to {}", mirror_path.display()))?;
+    } else {
+        fs::copy(source, &mirror_path)
+            .with_context(|| format!("Failed to copy Hymo file to {}", mirror_path.display()))?;
+        utils::copy_path_context(source, &mirror_path).ok();
+    }
+    
+    Ok(mirror_path)
+}
+
+fn ensure_mountpoint(path: &Path, file_type: FileType) {
+    if path.exists() { return; }
+    match file_type {
+        FileType::Directory => { let _ = fs::create_dir_all(path); },
+        _ => {
+            if let Some(parent) = path.parent() { let _ = fs::create_dir_all(parent); }
+            let _ = fs::File::create(path);
+        }
+    }
 }

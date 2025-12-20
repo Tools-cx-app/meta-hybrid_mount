@@ -1,15 +1,15 @@
 use std::{
     ffi::CString,
-    fs::{self, create_dir_all, remove_dir_all, remove_file, write, File},
+    fs::{self, create_dir_all, remove_file, File},
     io::Write,
     os::unix::fs::symlink,
-    path::{Path, PathBuf},
-    process::Command,
+    path::Path,
     sync::{Mutex, OnceLock},
     os::fd::RawFd,
     fmt as std_fmt,
     time::{SystemTime, UNIX_EPOCH},
     collections::HashSet,
+    process::Command,
 };
 use anyhow::{Context, Result, bail};
 use rustix::mount::{mount, MountFlags};
@@ -23,20 +23,15 @@ use tracing_subscriber::{
     EnvFilter,
 };
 use tracing_appender::non_blocking::WorkerGuard;
-use crate::defs;
-use crate::defs::TMPFS_CANDIDATES;
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
 use nix::ioctl_write_ptr_bad;
-
 #[cfg(any(target_os = "linux", target_os = "android"))]
 use extattr::{Flags as XattrFlags, lsetxattr};
 
 const SELINUX_XATTR: &str = "security.selinux";
-
-#[allow(dead_code)]
-const XATTR_TEST_FILE: &str = ".xattr_test";
 const DEFAULT_CONTEXT: &str = "u:object_r:system_file:s0";
+const XATTR_TEST_FILE: &str = ".xattr_test";
 
 struct SimpleFormatter;
 impl<S, N> FormatEvent<S, N> for SimpleFormatter
@@ -104,13 +99,8 @@ pub fn lsetfilecon<P: AsRef<Path>>(path: P, con: &str) -> Result<()> {
     {
         if let Err(e) = lsetxattr(&path, SELINUX_XATTR, con, XattrFlags::empty()) {
             let io_err = std::io::Error::from(e);
-            log::debug!("lsetfilecon: {} -> {} failed: {}", path.as_ref().display(), con, io_err);
+            tracing::debug!("lsetfilecon: {} -> {} failed: {}", path.as_ref().display(), con, io_err);
         }
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "android")))]
-    {
-        let _ = path;
-        let _ = con;
     }
     Ok(())
 }
@@ -163,35 +153,6 @@ pub fn random_kworker_name() -> String {
     format!("kworker/u{}:{}", x, y)
 }
 
-#[allow(dead_code)]
-pub fn is_xattr_supported(path: &Path) -> bool {
-    let test_file = path.join(XATTR_TEST_FILE);
-    if let Err(e) = write(&test_file, b"test") {
-        log::debug!("XATTR Check: Failed to create test file: {}", e);
-        return false;
-    }
-    let result = lsetfilecon(&test_file, "u:object_r:system_file:s0");
-    let supported = result.is_ok();
-    let _ = remove_file(test_file);
-    supported
-}
-
-pub fn is_mounted<P: AsRef<Path>>(path: P) -> bool {
-    let path_str = path.as_ref().to_string_lossy();
-    let search = path_str.trim_end_matches('/');
-    if let Ok(content) = fs::read_to_string("/proc/mounts") {
-        for line in content.lines() {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() > 1 {
-                if parts[1] == search {
-                    return true;
-                }
-            }
-        }
-    }
-    false
-}
-
 pub fn mount_tmpfs(target: &Path, source: &str) -> Result<()> {
     ensure_dir_exists(target)?;
     let data = CString::new("mode=0755")?;
@@ -200,52 +161,17 @@ pub fn mount_tmpfs(target: &Path, source: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn mount_image(image_path: &Path, target: &Path) -> Result<()> {
-    ensure_dir_exists(target)?;
-    lsetfilecon(image_path, "u:object_r:ksu_file:s0").ok();
-    let status = Command::new("mount")
-        .args(["-t", "ext4", "-o", "loop,rw,noatime"])
-        .arg(image_path)
-        .arg(target)
-        .status()
-        .context("Failed to execute mount command")?;
-    if !status.success() {
-        bail!("Mount command failed");
-    }
-    Ok(())
-}
-
-pub fn repair_image(image_path: &Path) -> Result<()> {
-    log::info!("Running e2fsck on {}", image_path.display());
-    let status = Command::new("e2fsck")
-        .args(["-y", "-f"])
-        .arg(image_path)
-        .status()
-        .context("Failed to execute e2fsck")?;
-    if let Some(code) = status.code() {
-        if code > 2 {
-            bail!("e2fsck failed with exit code: {}", code);
-        }
-    }
-    Ok(())
-}
-
 pub fn reflink_or_copy(src: &Path, dest: &Path) -> Result<u64> {
     let src_file = File::open(src)?;
     let dest_file = File::create(dest)?;
-
     if ioctl_ficlone(&dest_file, &src_file).is_ok() {
         let metadata = src_file.metadata()?;
         let len = metadata.len();
         dest_file.set_permissions(metadata.permissions())?;
-        tracing::trace!("Reflink success: {:?} -> {:?}", src, dest);
         return Ok(len);
     }
-
     drop(dest_file);
     drop(src_file);
-
-    tracing::trace!("Reflink failed (fallback to copy): {:?} -> {:?}", src, dest);
     fs::copy(src, dest).map_err(|e| e.into())
 }
 
@@ -284,51 +210,66 @@ pub fn sync_dir(src: &Path, dst: &Path) -> Result<()> {
     })
 }
 
-fn is_ok_empty<P: AsRef<Path>>(dir: P) -> bool {
-    if !dir.as_ref().exists() { return false; }
-    dir.as_ref()
-        .read_dir()
-        .is_ok_and(|mut entries| entries.next().is_none())
-}
-
-pub fn select_temp_dir() -> Result<PathBuf> {
-    for path_str in TMPFS_CANDIDATES {
-        let path = Path::new(path_str);
-        if is_ok_empty(path) {
-            log::info!("Selected dynamic temp root: {}", path.display());
-            return Ok(path.to_path_buf());
+pub fn is_mounted<P: AsRef<Path>>(path: P) -> bool {
+    let path_str = path.as_ref().to_string_lossy();
+    let search = path_str.trim_end_matches('/');
+    if let Ok(content) = fs::read_to_string("/proc/mounts") {
+        for line in content.lines() {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() > 1 && parts[1] == search {
+                return true;
+            }
         }
     }
-    let run_dir = Path::new(defs::RUN_DIR);
-    ensure_dir_exists(run_dir)?;
-    let work_dir = run_dir.join("workdir");
-    Ok(work_dir)
+    false
 }
 
-#[allow(dead_code)]
-pub fn cleanup_temp_dir(temp_dir: &Path) {
-    if let Err(e) = remove_dir_all(temp_dir) {
-        log::warn!("Failed to clean up temp dir {}: {:#}", temp_dir.display(), e);
+pub fn is_xattr_supported(path: &Path) -> bool {
+    let test_file = path.join(XATTR_TEST_FILE);
+    if fs::write(&test_file, b"test").is_err() {
+        return false;
     }
+    let result = lsetfilecon(&test_file, DEFAULT_CONTEXT);
+    let supported = result.is_ok();
+    let _ = remove_file(test_file);
+    supported
 }
 
-#[allow(dead_code)]
-pub fn ensure_temp_dir(temp_dir: &Path) -> Result<()> {
-    if temp_dir.exists() {
-        remove_dir_all(temp_dir).ok();
+pub fn mount_image(image_path: &Path, target: &Path) -> Result<()> {
+    ensure_dir_exists(target)?;
+    lsetfilecon(image_path, "u:object_r:ksu_file:s0").ok();
+    let status = Command::new("mount")
+        .args(["-t", "ext4", "-o", "loop,rw,noatime"])
+        .arg(image_path)
+        .arg(target)
+        .status()
+        .context("Failed to execute mount command")?;
+    if !status.success() {
+        bail!("Mount command failed");
     }
-    create_dir_all(temp_dir)?;
+    Ok(())
+}
+
+pub fn repair_image(image_path: &Path) -> Result<()> {
+    let status = Command::new("e2fsck")
+        .args(["-y", "-f"])
+        .arg(image_path)
+        .status()
+        .context("Failed to execute e2fsck")?;
+    if let Some(code) = status.code() {
+        if code > 2 {
+            bail!("e2fsck failed with exit code: {}", code);
+        }
+    }
     Ok(())
 }
 
 const KSU_INSTALL_MAGIC1: u32 = 0xDEADBEEF;
 const KSU_INSTALL_MAGIC2: u32 = 0xCAFEBABE;
-
 const KSU_IOCTL_NUKE_EXT4_SYSFS: u32 = 0x40004b11; 
 const KSU_IOCTL_ADD_TRY_UMOUNT: u32 = 0x40004b12;
 
 static DRIVER_FD: OnceLock<RawFd> = OnceLock::new();
-
 #[cfg(any(target_os = "linux", target_os = "android"))]
 static SENT_UNMOUNTS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
@@ -345,7 +286,6 @@ struct NukeExt4SysfsCmd {
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
 ioctl_write_ptr_bad!(ksu_add_try_umount, KSU_IOCTL_ADD_TRY_UMOUNT, KsuAddTryUmount);
-
 #[cfg(any(target_os = "linux", target_os = "android"))]
 ioctl_write_ptr_bad!(ksu_nuke_ext4_sysfs, KSU_IOCTL_NUKE_EXT4_SYSFS, NukeExt4SysfsCmd);
 
@@ -374,7 +314,6 @@ where
     let cache = SENT_UNMOUNTS.get_or_init(|| Mutex::new(HashSet::new()));
     let mut set = cache.lock().unwrap();
     if set.contains(&path_str) {
-        log::debug!("Unmount skipped (dedup): {}", path_str);
         return Ok(());
     }
     set.insert(path_str.clone());
@@ -386,7 +325,6 @@ where
     };
     let fd = *DRIVER_FD.get_or_init(grab_fd);
     if fd < 0 { return Ok(()); }
-    
     unsafe {
         ksu_add_try_umount(fd, &cmd)?;
     }
@@ -408,7 +346,6 @@ pub fn ksu_nuke_sysfs(target: &str) -> Result<()> {
     if fd < 0 {
         bail!("KSU driver not available");
     }
-    
     unsafe {
         ksu_nuke_ext4_sysfs(fd, &cmd)
             .context("KSU Nuke Sysfs ioctl failed")?;

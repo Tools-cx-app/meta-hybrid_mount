@@ -5,7 +5,6 @@ use std::fs;
 use std::os::fd::AsRawFd;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::ffi::CString;
-use procfs::process::Process;
 use rustix::{fd::AsFd, fs::CWD, mount::*};
 use crate::defs::{KSU_OVERLAY_SOURCE, RUN_DIR};
 use crate::utils::send_unmountable;
@@ -225,47 +224,6 @@ pub fn bind_mount(from: impl AsRef<Path>, to: impl AsRef<Path>, disable_umount: 
     Ok(())
 }
 
-fn mount_overlay_child(
-    mount_point: &str,
-    relative: &str,
-    module_roots: &[String],
-    stock_root: &str,
-    disable_umount: bool,
-) -> Result<()> {
-    let has_modification = module_roots.iter().any(|lower| {
-        let path = Path::new(lower).join(relative.trim_start_matches('/'));
-        path.exists()
-    });
-
-    if !has_modification {
-        return bind_mount(stock_root, mount_point, disable_umount);
-    }
-
-    if !Path::new(stock_root).is_dir() {
-        return Ok(());
-    }
-
-    let mut lower_dirs: Vec<String> = vec![];
-    for lower in module_roots {
-        let path = Path::new(lower).join(relative.trim_start_matches('/'));
-        if path.is_dir() {
-            lower_dirs.push(path.display().to_string());
-        } else if path.exists() {
-            return Ok(());
-        }
-    }
-
-    if lower_dirs.is_empty() {
-        return Ok(());
-    }
-
-    if let Err(e) = mount_overlayfs(&lower_dirs, stock_root, None, None, mount_point, disable_umount) {
-        warn!("failed to overlay child {mount_point}: {:#}, fallback to bind mount", e);
-        bind_mount(stock_root, mount_point, disable_umount)?;
-    }
-    Ok(())
-}
-
 pub fn mount_overlay(
     target_root: &str,
     module_roots: &[String],
@@ -275,39 +233,6 @@ pub fn mount_overlay(
 ) -> Result<()> {
     let root_file = fs::File::open(target_root)
         .with_context(|| format!("failed to open target root {}", target_root))?;
-    
     let stock_root = format!("/proc/self/fd/{}", root_file.as_raw_fd());
-    
-    let mounts = Process::myself()
-        .context("Failed to get current process info")?
-        .mountinfo()
-        .context("Failed to get mountinfo")?;
-
-    let mut mount_seq = mounts.0.iter()
-        .filter(|m| {
-            m.mount_point.starts_with(target_root) && 
-            m.mount_point != Path::new(target_root)
-        })
-        .map(|m| m.mount_point.to_string_lossy().to_string())
-        .collect::<Vec<_>>();
-    
-    mount_seq.sort();
-    mount_seq.dedup();
-
     mount_overlayfs(module_roots, &stock_root, upperdir, workdir, target_root, disable_umount)
-        .with_context(|| format!("mount overlayfs for root {target_root} failed"))?;
-
-    for mount_point in mount_seq {
-        let relative = mount_point.replacen(target_root, "", 1);
-        let stock_root_relative = format!("{}{}", stock_root, relative);
-        
-        if !Path::new(&stock_root_relative).exists() {
-            continue;
-        }
-
-        if let Err(e) = mount_overlay_child(&mount_point, &relative, module_roots, &stock_root_relative, disable_umount) {
-            warn!("failed to restore child mount {mount_point}: {:#}", e);
-        }
-    }
-    Ok(())
 }

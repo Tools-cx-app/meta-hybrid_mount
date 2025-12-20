@@ -26,7 +26,6 @@ struct StorageStatus {
     total_size: u64,
     used_size: u64,
     hymofs_available: bool,
-    hymofs_version: Option<i32>,
 }
 
 pub fn get_usage(path: &Path) -> (u64, u64, u8) {
@@ -181,7 +180,6 @@ pub fn print_status() -> Result<()> {
         total_size: total,
         used_size: used,
         hymofs_available: HymoFs::is_available(),
-        hymofs_version: HymoFs::get_version(),
     };
 
     println!("{}", serde_json::to_string(&status)?);

@@ -1,8 +1,7 @@
 use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::fs::{FileTypeExt, MetadataExt};
-use std::path::{Path, PathBuf};
+use std::path::{Path};
 use anyhow::Result;
 use serde::Serialize;
 use crate::conf::config::Config;
@@ -56,10 +55,11 @@ impl ModuleInfo {
         let prop = ModuleProp::from(m.source_path.join("module.prop").as_path());
         
         let mode_str = match m.rules.default_mode {
-            MountMode::Overlay => "auto",
+            MountMode::Overlay => "overlay",
             MountMode::HymoFs => "hymofs",
             MountMode::Magic => "magic",
             MountMode::Ignore => "ignore",
+            MountMode::Auto => "auto",
         };
 
         Self {
@@ -72,41 +72,6 @@ impl ModuleInfo {
             mode: mode_str.to_string(),
             rules: m.rules,
         }
-    }
-}
-
-pub struct ModuleFile {
-    pub relative_path: PathBuf,
-    pub real_path: PathBuf,
-    pub file_type: fs::FileType,
-    pub is_whiteout: bool,
-    pub is_replace: bool,
-    pub is_replace_file: bool,
-}
-
-impl ModuleFile {
-    pub fn new(root: &Path, relative: &Path) -> Result<Self> {
-        let real_path = root.join(relative);
-        let metadata = fs::symlink_metadata(&real_path)?;
-        let file_type = metadata.file_type();
-        
-        let is_whiteout = file_type.is_char_device() && metadata.rdev() == 0;
-        
-        let is_replace = file_type.is_dir() && real_path.join(defs::REPLACE_DIR_FILE_NAME).exists();
-        
-        let is_replace_file = real_path.file_name()
-            .and_then(|n| n.to_str())
-            .map(|s| s == defs::REPLACE_DIR_FILE_NAME)
-            .unwrap_or(false);
-
-        Ok(Self {
-            relative_path: relative.to_path_buf(),
-            real_path,
-            file_type,
-            is_whiteout,
-            is_replace,
-            is_replace_file,
-        })
     }
 }
 

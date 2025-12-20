@@ -5,13 +5,12 @@ pub mod state;
 pub mod storage;
 pub mod sync;
 pub mod modules;
+pub mod tree;
 
 use std::path::Path;
 use anyhow::Result;
 use crate::conf::config::Config;
 use crate::utils;
-
-// --- Typestate States ---
 
 pub struct Init;
 
@@ -26,15 +25,11 @@ pub struct ModulesReady {
 
 pub struct Planned {
     pub handle: storage::StorageHandle,
-    pub modules: Vec<inventory::Module>,
     pub plan: planner::MountPlan,
 }
 
 pub struct Executed {
     pub handle: storage::StorageHandle,
-    #[allow(dead_code)]
-    pub modules: Vec<inventory::Module>,
-    pub plan: planner::MountPlan,
     pub result: executor::ExecutionResult,
 }
 
@@ -103,7 +98,6 @@ impl OryzaEngine<ModulesReady> {
             config: self.config,
             state: Planned { 
                 handle: self.state.handle, 
-                modules: self.state.modules, 
                 plan 
             },
         })
@@ -120,8 +114,6 @@ impl OryzaEngine<Planned> {
             config: self.config,
             state: Executed {
                 handle: self.state.handle,
-                modules: self.state.modules,
-                plan: self.state.plan,
                 result
             },
         })
@@ -154,10 +146,6 @@ impl OryzaEngine<Executed> {
 
         let storage_stats = storage::get_usage(&self.state.handle.mount_point);
         let hymofs_available = storage::is_hymofs_active();
-        let active_mounts: Vec<String> = self.state.plan.overlay_ops
-            .iter()
-            .map(|op| op.partition_name.clone())
-            .collect();
         
         let state = state::RuntimeState::new(
             self.state.handle.mode,
@@ -166,7 +154,7 @@ impl OryzaEngine<Executed> {
             self.state.result.magic_module_ids,
             self.state.result.hymo_module_ids,
             nuke_active,
-            active_mounts,
+            Vec::new(),
             storage_stats,
             hymofs_available
         );
