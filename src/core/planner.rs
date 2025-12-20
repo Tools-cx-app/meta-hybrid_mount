@@ -1,7 +1,11 @@
 use std::path::{Path, PathBuf};
 use anyhow::Result;
 use walkdir::WalkDir;
-use crate::{conf::config::Config, defs, core::{inventory::{self, Module}, tree::{FsNode, Mutation, FileType, MountStrategy}}};
+use crate::{
+    conf::config::Config, 
+    defs, 
+    core::{inventory::{self, Module, MountMode}, tree::{FsNode, Mutation, FileType, MountStrategy}}
+};
 
 #[derive(Debug)]
 pub struct MountPlan {
@@ -68,7 +72,13 @@ pub fn generate(
     let mut root = FsNode::new("/", PathBuf::from("/"));
 
     for module in modules {
-        let mut content_path = storage_root.join(&module.id);
+        let search_root = if matches!(module.rules.default_mode, MountMode::HymoFs) {
+            Path::new(defs::HYMO_MIRROR_DIR)
+        } else {
+            storage_root
+        };
+
+        let mut content_path = search_root.join(&module.id);
         if !content_path.exists() {
             content_path = module.source_path.clone();
         }
