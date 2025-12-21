@@ -1,4 +1,9 @@
-use std::{collections::HashMap, fmt, fs::FileType, path::PathBuf};
+use std::{
+    collections::HashMap,
+    fmt,
+    fs::FileType,
+    path::{Component, PathBuf},
+};
 
 use crate::core::modules::ModuleFile;
 
@@ -133,7 +138,7 @@ impl Node {
     }
     fn add_module_file(&mut self, module_file: ModuleFile) {
         let mut current_node = self;
-        let components: Vec<_> = module_file.relative_path.components().collect();
+        let components: Vec<Component> = module_file.relative_path.components().collect();
         for (i, component) in components.iter().enumerate() {
             let name = component.as_os_str().to_string_lossy().to_string();
             let is_last = i == components.len() - 1;

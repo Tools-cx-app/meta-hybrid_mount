@@ -1,18 +1,18 @@
 use std::{
     collections::hash_map::Entry,
     collections::{HashMap, HashSet},
-    fs::{self, create_dir, create_dir_all, read_dir, read_link, DirEntry},
-    os::unix::fs::{symlink, MetadataExt},
+    fs::{self, DirEntry, create_dir, create_dir_all, read_dir, read_link},
+    os::unix::fs::{MetadataExt, symlink},
     path::{Path, PathBuf},
 };
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use rayon::prelude::*;
 use rustix::{
-    fs::{chmod, chown, Gid, Mode, Uid},
+    fs::{Gid, Mode, Uid, chmod, chown},
     mount::{
-        mount, mount_bind, mount_change, mount_move, mount_remount, unmount, MountFlags,
-        MountPropagationFlags, UnmountFlags,
+        MountFlags, MountPropagationFlags, UnmountFlags, mount, mount_bind, mount_change,
+        mount_move, mount_remount, unmount,
     },
 };
 
