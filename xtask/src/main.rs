@@ -11,7 +11,7 @@ use zip::{write::FileOptions, CompressionMethod};
 mod zip_ext;
 use crate::zip_ext::zip_create_from_directory_with_options;
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq)]
 enum Arch {
     #[value(name = "arm64")]
     Arm64,
@@ -62,6 +62,8 @@ enum Commands {
         release: bool,
         #[arg(long)]
         skip_webui: bool,
+        #[arg(long, value_enum)]
+        arch: Option<Arch>,
     },
     Lint,
 }
@@ -70,8 +72,8 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let root = project_root();
     match cli.command {
-        Commands::Build { release, skip_webui } => {
-            build_full(&root, release, skip_webui)?;
+        Commands::Build { release, skip_webui, arch } => {
+            build_full(&root, release, skip_webui, arch)?;
         }
         Commands::Lint => {
             run_clippy(&root)?;
@@ -114,7 +116,7 @@ fn run_clippy(root: &Path) -> Result<()> {
     Ok(())
 }
 
-fn build_full(root: &Path, release: bool, skip_webui: bool) -> Result<()> {
+fn build_full(root: &Path, release: bool, skip_webui: bool, target_arch: Option<Arch>) -> Result<()> {
     let output_dir = root.join("output");
     let stage_dir = output_dir.join("staging");
     if output_dir.exists() { fs::remove_dir_all(&output_dir)?; }
@@ -124,8 +126,14 @@ fn build_full(root: &Path, release: bool, skip_webui: bool) -> Result<()> {
         println!(":: Building WebUI...");
         build_webui(root, &version)?;
     }
-    let archs = [Arch::Arm64, Arch::X86_64, Arch::Riscv64];
-    for arch in archs {
+    
+    let archs_to_build = if let Some(selected) = target_arch {
+        vec![selected]
+    } else {
+        vec![Arch::Arm64, Arch::X86_64, Arch::Riscv64]
+    };
+
+    for arch in archs_to_build {
         println!(":: Compiling Core for {:?}...", arch);
         compile_core(root, release, arch)?;
         let bin_name = "meta-hybrid";

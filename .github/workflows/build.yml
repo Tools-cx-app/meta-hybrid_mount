@@ -72,7 +72,8 @@ jobs:
 
       - name: Build All
         run: |
-          cargo run -p xtask -- build --release
+          # Only build for arm64 (armv8) to speed up CI
+          cargo run -p xtask -- build --release --arch arm64
 
       - name: Setup Python
         uses: actions/setup-python@v5
