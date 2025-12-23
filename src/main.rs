@@ -88,17 +88,19 @@ fn main() -> Result<()> {
         log::error!("Failed to engage Ratoon Protocol: {}", e);
     }
 
-    if utils::check_zygisksu_enforce_status() && config.allow_umount_coexistence {
-        if config.verbose {
-            println!(
-                ">> ZygiskSU Enforce!=0 detected, but Umount Coexistence enabled. Respecting user config."
-            );
+    if utils::check_zygisksu_enforce_status() {
+        if config.allow_umount_coexistence {
+            if config.verbose {
+                println!(
+                    ">> ZygiskSU Enforce!=0 detected, but Umount Coexistence enabled. Respecting user config."
+                );
+            }
+        } else {
+            if config.verbose {
+                println!(">> ZygiskSU Enforce!=0 detected. Forcing DISABLE_UMOUNT to TRUE.");
+            }
+            config.disable_umount = true;
         }
-    } else {
-        if config.verbose {
-            println!(">> ZygiskSU Enforce!=0 detected. Forcing DISABLE_UMOUNT to TRUE.");
-        }
-        config.disable_umount = true;
     }
 
     if config.dry_run {
