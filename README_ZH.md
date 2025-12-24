@@ -112,5 +112,4 @@ Meta-Hybrid 能够为每个模块智能选择最佳挂载方案：
 ## 🤝 致谢与协议
 
 * 感谢开源社区的所有贡献者。
-* **姊妹项目**: [Hymo](https://github.com/Anatdx/hymo) - HymoFS 强大的内核侧驱动支持。
 * **开源协议**: 本项目遵循 [GPL-3.0 协议](https://github.com/YuzakiKokuban/meta-hybrid_mount/blob/master/LICENSE)
