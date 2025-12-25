@@ -3,11 +3,11 @@ use std::{
     ffi::CString,
     fmt as std_fmt,
     fs::{self, File, create_dir_all, remove_dir_all, remove_file, write},
-    io::Write,
+    io::{BufRead, Write},
     os::fd::RawFd,
     os::unix::fs::{PermissionsExt, symlink},
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
     sync::{Mutex, OnceLock},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -548,17 +548,35 @@ pub fn create_erofs_image(src_dir: &Path, image_path: &Path) -> Result<()> {
         std::ffi::OsStr::new("mkfs.erofs")
     };
 
-    let status = Command::new(cmd_name)
+    log::info!("Packing EROFS image: {}", image_path.display());
+
+    let output = Command::new(cmd_name)
         .arg("-z")
         .arg("lz4hc")
         .arg(image_path)
         .arg(src_dir)
-        .status()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
         .context("Failed to execute mkfs.erofs")?;
 
-    if !status.success() {
+    let log_lines = |bytes: &[u8]| {
+        let s = String::from_utf8_lossy(bytes);
+        for line in s.lines() {
+            if !line.trim().is_empty() {
+                log::debug!("{}", line);
+            }
+        }
+    };
+
+    log_lines(&output.stdout);
+    log_lines(&output.stderr);
+
+    if !output.status.success() {
         bail!("Failed to create EROFS image");
     }
+
+    log::info!("Build Completed.");
 
     let _ = fs::set_permissions(image_path, fs::Permissions::from_mode(0o644));
     lsetfilecon(image_path, "u:object_r:ksu_file:s0")?;
